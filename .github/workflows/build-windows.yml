@@ -1,0 +1,108 @@
+name: Build Windows app
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install -r packaging/requirements-build.txt
+
+      - name: Download ffmpeg and Deno (bundled into the app)
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          New-Item -ItemType Directory -Force bin, tmp | Out-Null
+          Invoke-WebRequest https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip -OutFile tmp/ffmpeg.zip
+          Expand-Archive tmp/ffmpeg.zip tmp/ffmpeg
+          Get-ChildItem tmp/ffmpeg -Recurse -Include ffmpeg.exe, ffprobe.exe | Copy-Item -Destination bin
+          Invoke-WebRequest https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip -OutFile tmp/deno.zip
+          Expand-Archive tmp/deno.zip bin
+          Get-ChildItem bin | Format-Table Name, Length
+
+      - name: Build MuGo.exe
+        run: >
+          pyinstaller --noconfirm --onedir --windowed --name MuGo
+          --icon packaging/mugo.ico --paths .
+          --add-data "mugo/static;mugo/static"
+          --add-data "packaging/mugo.ico;packaging"
+          --add-data "bin;bin"
+          --collect-all yt_dlp --collect-all yt_dlp_ejs
+          --hidden-import mugo.server --hidden-import pystray._win32
+          packaging/launcher.py
+
+      - name: Smoke test the packaged app
+        shell: pwsh
+        run: |
+          $env:MUGO_HOME = "$env:RUNNER_TEMP\mugo-test"
+          $p = Start-Process dist/MuGo/MuGo.exe -ArgumentList '--no-browser', '--port', '7799' -PassThru
+          $ok = $false
+          foreach ($i in 1..30) {
+            Start-Sleep 2
+            try { if ((Invoke-WebRequest http://127.0.0.1:7799/api/state -UseBasicParsing).StatusCode -eq 200) { $ok = $true; break } } catch {}
+          }
+          if (-not $ok) { Get-Content "$env:MUGO_HOME\mugo.log" -ErrorAction SilentlyContinue; throw "MuGo.exe did not start" }
+          if ((Invoke-WebRequest http://127.0.0.1:7799/ -UseBasicParsing).Content -notmatch 'MuGo') { throw "UI not served" }
+          Write-Host "Server and UI OK. Trying a real YouTube download (informational; CI IPs are often bot-blocked)…"
+          Invoke-RestMethod -Method Post http://127.0.0.1:7799/api/add -ContentType 'application/json' -Body '{"url":"https://www.youtube.com/watch?v=jNQXAC9IVRw"}' | Out-Null
+          foreach ($i in 1..45) {
+            Start-Sleep 2
+            $s = (Invoke-RestMethod http://127.0.0.1:7799/api/state).songs | Where-Object id -eq 'jNQXAC9IVRw'
+            if ($s.status -in 'ready', 'error') { break }
+          }
+          Write-Host "Download status: $($s.status) $($s.error)"
+          if ($s.status -eq 'ready') {
+            $body = '{"source":"jNQXAC9IVRw","segments":[{"start":0,"end":8,"speed":0.8}],"pitch":"vinyl"}'
+            $e = Invoke-RestMethod -Method Post http://127.0.0.1:7799/api/edit -ContentType 'application/json' -Body $body
+            Start-Sleep 8
+            $r = (Invoke-RestMethod http://127.0.0.1:7799/api/state).songs | Where-Object id -eq $e.id
+            Write-Host "Editor render: $($r.status) $($r.duration)s $($r.error)"
+          }
+          Get-Content "$env:MUGO_HOME\mugo.log" -ErrorAction SilentlyContinue
+          Stop-Process $p -Force
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress | Out-Null
+          $env:MUGO_VERSION = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME.TrimStart('v') } else { '0.0.0-dev' }
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging\mugo.iss
+          Compress-Archive dist/MuGo/* dist/MuGo-portable-win64.zip
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MuGo-windows
+          path: |
+            dist/MuGo-Setup.exe
+            dist/MuGo-portable-win64.zip
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: MuGo ${{ github.ref_name }}
+          files: |
+            dist/MuGo-Setup.exe
+            dist/MuGo-portable-win64.zip
+          body: |
+            ## Download
+            **[⬇ MuGo-Setup.exe](https://github.com/${{ github.repository }}/releases/latest/download/MuGo-Setup.exe)**: double-click it and you're done. Everything is included (ffmpeg and the YouTube downloader).
+
+            If Windows shows *"Windows protected your PC"*, click **More info → Run anyway**. This appears because the app isn't code-signed.
+
+            Your music is saved in `%USERPROFILE%\MuGo`. MuGo lives in the system tray (bottom-right), so right-click its icon to open or quit it.
+            Prefer no installer? Grab `MuGo-portable-win64.zip`, unzip it, and run `MuGo.exe`.

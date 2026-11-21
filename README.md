@@ -5,6 +5,17 @@ It also has a **Studio** for trimming songs, cutting out parts and slowing down 
 
 ![Home](docs/home.png)
 
+## ⬇ Download (Windows)
+
+### **[Download MuGo-Setup.exe](https://github.com/froodyofficial-maker/MuGo/releases/latest/download/MuGo-Setup.exe)**
+
+Double-click it, and MuGo opens. That's it: ffmpeg and the YouTube downloader are built in, and you don't need Python.
+
+- If Windows says **"Windows protected your PC"**, click **More info → Run anyway**. It shows up because the app isn't code-signed.
+- MuGo opens in its own window and keeps running in the **system tray** (bottom-right, near the clock). Right-click the tray icon to **Open** or **Quit**.
+- Your music is saved in `%USERPROFILE%\MuGo`. Uninstalling MuGo doesn't delete it.
+- The downloader updates itself automatically, so it keeps working when YouTube changes things.
+
 ## Features
 
 - **Paste to add.** Use the top bar, press `Ctrl/⌘+V` anywhere on the page, or drag a link onto the window. Videos, Shorts, `music.youtube.com` links and whole playlists all work.
@@ -24,7 +35,9 @@ It also has a **Studio** for trimming songs, cutting out parts and slowing down 
 |---|---|---|
 | ![](docs/playlist.png) | ![](docs/now-playing.png) | ![](docs/studio.png) |
 
-## Setup (one time)
+## Run from source (macOS / Linux / developers)
+
+### Setup (one time)
 
 You need **Python 3.9+** and **ffmpeg**:
 
@@ -36,7 +49,7 @@ You need **Python 3.9+** and **ffmpeg**:
 
 > Recommended: also install [Deno](https://deno.com) (`brew install deno` / `winget install deno`). yt-dlp uses it to handle YouTube's newer protections.
 
-## Run it
+### Run it
 
 ```bash
 git clone https://github.com/froodyofficial-maker/MuGo.git
@@ -50,7 +63,7 @@ The launcher creates a virtual environment, installs and updates the dependencie
 
 Tip: in Chrome or Edge, use **⋮ → Cast, save and share → Install page as app** to give MuGo its own window and dock icon.
 
-### Options
+#### Options
 
 | | |
 |---|---|
@@ -74,11 +87,13 @@ Tip: in Chrome or Edge, use **⋮ → Cast, save and share → Install page as a
 ```
 mugo/server.py      Flask server: library (library.json), yt-dlp download queue, ffmpeg editor renders
 mugo/static/        the web app (plain HTML/CSS/JS, no build step)
+packaging/          Windows build: PyInstaller + Inno Setup (built by .github/workflows/build-windows.yml)
 ~/MuGo/             your data: audio/, thumbs/, library.json
 ```
 
 ## Troubleshooting
 
-- **A download fails.** YouTube changes often. Restart with `run.sh`/`run.bat`, which auto-updates yt-dlp, then hit the ↻ retry button on the song.
+- **A download fails.** YouTube changes often. Quit MuGo from the tray and open it again (it fetches the newest downloader on start), then hit the ↻ retry button on the song. From source, `run.sh`/`run.bat` updates it.
+- **Something else is wrong (Windows app).** The log is at `%USERPROFILE%\MuGo\mugo.log`.
 - **"ffmpeg not found".** Install it (see Setup) and restart.
 - For personal use only. Respect YouTube's Terms of Service and artists' copyrights.
