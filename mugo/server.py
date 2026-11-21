@@ -319,6 +319,44 @@ def autosave():
 # --------------------------------------------------------------------------
 # Editor rendering (ffmpeg)
 # --------------------------------------------------------------------------
+_FF_FILTERS: set[str] | None = None
+
+
+def ff_has(name: str) -> bool:
+    """Which optional ffmpeg filters/resamplers this ffmpeg build has (cached)."""
+    global _FF_FILTERS
+    if _FF_FILTERS is None:
+        try:
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            out = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], capture_output=True, text=True,
+                                 creationflags=flags).stdout
+            conf = subprocess.run(["ffmpeg", "-hide_banner", "-buildconf"], capture_output=True, text=True,
+                                  creationflags=flags).stdout
+            _FF_FILTERS = {ln.split()[1] for ln in out.splitlines() if len(ln.split()) > 2}
+            if "libsoxr" in conf:
+                _FF_FILTERS.add("soxr")
+        except Exception:
+            _FF_FILTERS = set()
+    return name in _FF_FILTERS
+
+
+_AFIR_NORM: str | None = None
+
+
+def afir_norm() -> str:
+    """Energy-normalise the reverb impulse response. The option was renamed
+    between ffmpeg 6 (gtype=gn) and 7 (irnorm=2), so ask this ffmpeg."""
+    global _AFIR_NORM
+    if _AFIR_NORM is None:
+        try:
+            h = subprocess.run(["ffmpeg", "-hide_banner", "-h", "filter=afir"], capture_output=True, text=True,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+        except Exception:
+            h = ""
+        _AFIR_NORM = ":irnorm=2" if "irnorm" in h else ":gtype=gn" if "gtype" in h else ""
+    return _AFIR_NORM
+
+
 def atempo_chain(speed: float) -> list[str]:
     parts = []
     s = speed
@@ -333,48 +371,94 @@ def atempo_chain(speed: float) -> list[str]:
     return parts
 
 
-def build_filter(segments: list[dict], pitch_mode: str, fade_in: float, fade_out: float) -> tuple[str, float]:
+def stretch_chain(speed: float) -> list[str]:
+    """Change tempo without changing pitch, studio-style.
+    Rubber Band (the engine used by many DAWs) with phase-coherent stereo,
+    formant preservation and its high-quality pitch path; WSOLA (atempo) only
+    as a fallback when this ffmpeg build lacks librubberband."""
+    if ff_has("rubberband"):
+        return [
+            f"rubberband=tempo={speed:.5f}:pitch=1:transients=mixed:detector=compound:phase=laminar"
+            ":window=standard:formant=preserved:pitchq=quality:channels=together"
+        ]
+    return atempo_chain(speed)
+
+
+def resample_opts() -> str:
+    return ":resampler=soxr:precision=28" if ff_has("soxr") else ""
+
+
+REVERBS = {  # name: (tail seconds, wet level, lowpass on the tail)
+    "room": (1.1, 0.06, 7000),
+    "hall": (2.6, 0.07, 5500),
+    "dreamy": (4.2, 0.14, 4200),
+}
+
+
+def build_filter(segments: list[dict], opts: dict) -> tuple[str, float]:
+    pitch_mode = opts.get("pitch", "keep")
+    fade_in, fade_out = float(opts.get("fadeIn", 0)), float(opts.get("fadeOut", 0))
+    rs = resample_opts()
     n = len(segments)
-    lines = [f"[0:a]aresample=44100,asplit={n}" + "".join(f"[in{i}]" for i in range(n))]
+    lines = [f"[0:a]aresample=44100{rs},aformat=sample_fmts=fltp:channel_layouts=stereo,asplit={n}"
+             + "".join(f"[in{i}]" for i in range(n))]
     total = 0.0
     for i, seg in enumerate(segments):
         a, b, sp = float(seg["start"]), float(seg["end"]), float(seg.get("speed", 1))
         sp = min(max(sp, 0.25), 3.0)
         chain = [f"atrim=start={a:.4f}:end={b:.4f}", "asetpts=PTS-STARTPTS"]
         if abs(sp - 1) > 1e-4:
-            if pitch_mode == "vinyl":  # speed + pitch move together (slowed/nightcore)
-                chain += [f"asetrate={44100 * sp:.2f}", "aresample=44100"]
+            if pitch_mode == "vinyl":  # true varispeed: pitch follows speed, like slowing a turntable
+                chain += [f"asetrate={44100 * sp:.3f}", f"aresample=44100{rs}"]
             else:
-                chain += atempo_chain(sp)
+                chain += stretch_chain(sp)
         out_len = (b - a) / sp
         total += out_len
-        f = min(0.008, out_len / 4)  # micro-fades to avoid clicks at cut points
-        chain += [f"afade=t=in:d={f:.4f}", f"afade=t=out:st={max(out_len - f, 0):.4f}:d={f:.4f}"]
+        f = min(0.012, out_len / 4)  # tiny fades so cut points never click
+        chain += [f"afade=t=in:d={f:.4f}:curve=qsin", f"afade=t=out:st={max(out_len - f, 0):.4f}:d={f:.4f}:curve=qsin"]
         lines.append(f"[in{i}]" + ",".join(chain) + f"[s{i}]")
     lines.append("".join(f"[s{i}]" for i in range(n)) + f"concat=n={n}:v=0:a=1[cat]")
+    last = "cat"
+    rev = REVERBS.get(opts.get("reverb") or "")
+    if rev:  # convolution reverb with a generated, decorrelated stereo impulse response
+        tail, wet, lp = rev
+        for ch, seed in (("l", 7), ("r", 13)):
+            lines.append(f"anoisesrc=d={tail}:c=pink:r=44100:a=0.9:seed={seed},lowpass=f={lp},"
+                         f"afade=t=in:d=0.012,afade=t=out:st=0:d={tail}:curve=exp[ir{ch}]")
+        lines.append("[irl][irr]join=inputs=2:channel_layout=stereo[ir]")
+        lines.append("[cat]asplit=2[dry][send]")
+        lines.append(f"[send][ir]afir=dry=1:wet=1{afir_norm()}[wet]")
+        lines.append(f"[dry][wet]amix=inputs=2:weights=1 {wet}:normalize=0:duration=first[rv]")
+        last = "rv"
+        total += 0  # the tail is cut to the song length (duration=first)
     post = []
     if fade_in > 0:
         post.append(f"afade=t=in:d={fade_in:.3f}")
     if fade_out > 0:
         post.append(f"afade=t=out:st={max(total - fade_out, 0):.3f}:d={fade_out:.3f}")
-    lines.append("[cat]" + (",".join(post) if post else "anull") + "[out]")
+    post.append("alimiter=limit=0.97:attack=3:release=60:level=false")  # never clip
+    lines.append(f"[{last}]" + ",".join(post) + "[out]")
     return ";".join(lines), total
 
 
-def render_edit(new_id: str, src_path: Path, segments, pitch_mode, fade_in, fade_out):
+def run_render(src_path: Path, segments, opts: dict, out: Path) -> float:
+    graph, total = build_filter(segments, opts)
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(src_path),
+        "-filter_complex", graph, "-map", "[out]", "-c:a", "aac", "-b:a", "256k", "-vn", str(out),
+    ]
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # no flashing console on Windows
+    r = subprocess.run(cmd, capture_output=True, text=True, creationflags=flags)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip()[-300:] or "ffmpeg failed")
+    return total
+
+
+def render_edit(new_id: str, src_path: Path, segments, opts: dict):
     song = lib.songs[new_id]
     try:
-        graph, total = build_filter(segments, pitch_mode, fade_in, fade_out)
         out = AUDIO_DIR / f"{new_id}.m4a"
-        cmd = [
-            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(src_path),
-            "-filter_complex", graph, "-map", "[out]", "-c:a", "aac", "-b:a", "192k",
-            "-vn", str(out),
-        ]
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # no flashing console on Windows
-        r = subprocess.run(cmd, capture_output=True, text=True, creationflags=flags)
-        if r.returncode != 0:
-            raise RuntimeError(r.stderr.strip()[-300:] or "ffmpeg failed")
+        total = run_render(src_path, segments, opts, out)
         song.update(file=out.name, duration=round(total, 2), status="ready", progress=100)
     except Exception as e:
         song.update(status="error", error=str(e)[:300])
@@ -385,6 +469,7 @@ def render_edit(new_id: str, src_path: Path, segments, pitch_mode, fade_in, fade
 # HTTP API
 # --------------------------------------------------------------------------
 app = Flask(__name__, static_folder=None)
+app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # cover uploads
 
 
 @app.after_request
@@ -458,6 +543,64 @@ def retry(sid):
         abort(400)
     song.update(status="queued", error=None, progress=0)
     jobs.put(sid)
+    lib.save()
+    return jsonify(song)
+
+
+IMAGE_MAGIC = (b"\xff\xd8\xff", b"\x89PNG", b"GIF8", b"RIFF", b"BM")
+
+
+@app.post("/api/songs/<sid>/thumb")
+def upload_thumb(sid):
+    """Set a custom cover image (any common image type; stored as JPEG)."""
+    song = lib.songs.get(sid) or abort(404)
+    f = request.files.get("image")
+    if not f:
+        return jsonify({"error": "No image received"}), 400
+    data = f.read()
+    if not data.startswith(IMAGE_MAGIC) and b"ftypavif" not in data[:32] and b"ftypheic" not in data[:32]:
+        return jsonify({"error": "That file isn't an image MuGo can use (try JPG, PNG or WebP)"}), 400
+    out = THUMB_DIR / f"{sid}.jpg"
+    tmp = THUMB_DIR / f"{sid}.upload"
+    tmp.write_bytes(data)
+    try:
+        # normalise to a reasonably sized JPEG; keep the raw file if ffmpeg can't read it
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(tmp), "-frames:v", "1",
+             "-vf", "scale='min(1200,iw)':-2", "-q:v", "3", str(out.with_suffix(".new.jpg"))],
+            capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if r.returncode == 0:
+            os.replace(out.with_suffix(".new.jpg"), out)
+        else:
+            os.replace(tmp, out)
+    except FileNotFoundError:  # no ffmpeg: browsers sniff the real image type anyway
+        os.replace(tmp, out)
+    finally:
+        tmp.unlink(missing_ok=True)
+    song.update(thumb=True, customThumb=True, thumbVer=int(now() * 1000))
+    lib.save()
+    return jsonify(song)
+
+
+@app.delete("/api/songs/<sid>/thumb")
+def reset_thumb(sid):
+    """Go back to the original YouTube artwork."""
+    song = lib.songs.get(sid) or abort(404)
+    path = THUMB_DIR / f"{sid}.jpg"
+    if song["source"] == "youtube":
+        song["thumb"] = fetch_thumb(sid) or (path.exists() and not song.get("customThumb"))
+    else:
+        parent = THUMB_DIR / f"{song.get('parent')}.jpg"
+        if parent.exists():
+            shutil.copy(parent, path)
+            song["thumb"] = True
+        else:
+            path.unlink(missing_ok=True)
+            song["thumb"] = False
+    if not song["thumb"]:
+        path.unlink(missing_ok=True)
+    song.update(customThumb=False, thumbVer=int(now() * 1000))
     lib.save()
     return jsonify(song)
 
@@ -561,12 +704,47 @@ def edit():
         lib.songs[new_id] = song
         lib.save()
     threading.Thread(
-        target=render_edit,
-        args=(new_id, AUDIO_DIR / src["file"], segs, body.get("pitch", "keep"),
-              float(body.get("fadeIn", 0)), float(body.get("fadeOut", 0))),
-        daemon=True,
+        target=render_edit, args=(new_id, AUDIO_DIR / src["file"], segs, edit_opts(body)), daemon=True,
     ).start()
     return jsonify(song)
+
+
+def edit_opts(body: dict) -> dict:
+    return {
+        "pitch": body.get("pitch", "keep"),
+        "fadeIn": float(body.get("fadeIn", 0) or 0),
+        "fadeOut": float(body.get("fadeOut", 0) or 0),
+        "reverb": body.get("reverb") if body.get("reverb") in REVERBS else None,
+    }
+
+
+preview_lock = threading.Lock()
+
+
+@app.post("/api/preview")
+def preview():
+    """Render the edit at full quality (same engine as Save) for listening."""
+    body = request.json or {}
+    src = lib.songs.get(body.get("source")) or abort(404)
+    segs = [s for s in body.get("segments", []) if float(s["end"]) - float(s["start"]) > 0.01]
+    if not segs:
+        return jsonify({"error": "Nothing left to play — every part was cut."}), 400
+    cache = DATA_DIR / "cache"
+    cache.mkdir(exist_ok=True)
+    with preview_lock:
+        try:
+            total = run_render(AUDIO_DIR / src["file"], segs, edit_opts(body), cache / "preview.m4a")
+        except Exception as e:
+            return jsonify({"error": f"Preview failed: {e}"}), 500
+    return jsonify({"url": f"/media/preview?v={int(now() * 1000)}", "duration": total})
+
+
+@app.get("/media/preview")
+def preview_file():
+    path = DATA_DIR / "cache" / "preview.m4a"
+    if not path.exists():
+        abort(404)
+    return send_file(path, conditional=True, max_age=0)
 
 
 # --------------------------------------------------------------------------

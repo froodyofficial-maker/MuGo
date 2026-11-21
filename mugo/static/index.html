@@ -6,6 +6,7 @@
 <title>MuGo</title>
 <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/tapes.css">
 </head>
 <body>
 <div class="ambient" aria-hidden="true">
@@ -27,6 +28,7 @@
       <a href="#/downloads" data-route="downloads"><i data-icon="download"></i><span>Downloads</span><b class="badge" id="dlBadge" hidden></b></a>
       <a href="#/editor" data-route="editor"><i data-icon="scissors"></i><span>Studio</span></a>
     </nav>
+    <button class="mode-toggle" id="tapeToggle" title="Tape mode (T): see your music as cassettes"><i data-icon="cassette"></i><span>Tape mode</span><b class="switch"></b></button>
     <div class="side-head">
       <span>Playlists</span>
       <button class="icon-btn sm" id="newPlaylistBtn" title="New playlist"><i data-icon="plus"></i></button>
@@ -88,6 +90,7 @@
 <div class="np" id="np" hidden>
   <div class="np-bg"><img alt=""></div>
   <button class="icon-btn np-close" id="npClose" title="Close (Esc)"><i data-icon="chevronDown"></i></button>
+  <button class="np-pill" id="shakeToggle" title="Aggressive shakes (X): the artwork shakes with the music"><i data-icon="bolt"></i><span>Aggressive shakes</span></button>
   <div class="np-body">
     <div class="np-art-wrap">
       <div class="np-glow"></div>
@@ -125,8 +128,10 @@
 <div class="toasts" id="toasts"></div>
 <div class="drop-hint" id="dropHint" hidden><div><i data-icon="link"></i><p>Drop a YouTube link to add it</p></div></div>
 
+<input type="file" id="coverInput" accept="image/*" hidden>
 <audio id="audio" preload="auto" crossorigin="anonymous"></audio>
 <script src="/static/icons.js"></script>
+<script src="/static/tapes.js"></script>
 <script src="/static/app.js"></script>
 <script src="/static/editor.js"></script>
 </body>

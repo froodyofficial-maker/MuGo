@@ -43,12 +43,13 @@ const api = {
   patchPl: (id, b) => req('PATCH', `/api/playlists/${id}`, b),
   delPl: id => req('DELETE', `/api/playlists/${id}`),
   edit: b => req('POST', '/api/edit', b),
+  preview: b => req('POST', '/api/preview', b),
 };
 
 /* ---------------- state ---------------- */
 const S = { songs: [], byId: {}, playlists: [], sig: '', route: { name: 'home', arg: null }, search: '', dataDir: '' };
 const ready = s => s && s.status === 'ready';
-const thumb = s => s && s.thumb ? `/media/thumb/${s.id}` : '';
+const thumb = s => s && s.thumb ? `/media/thumb/${s.id}?v=${s.thumbVer || 0}` : '';
 const artHTML = (s, cls = '') => s && s.thumb
   ? `<img class="${cls}" src="${thumb(s)}" alt="" loading="lazy" draggable="false">`
   : `<div class="noart ${cls}">${icon('music')}</div>`;
@@ -66,7 +67,7 @@ async function refresh(force = false) {
     if (p && p.status !== 'ready' && s.status === 'ready') toast(s.source === 'edit' ? 'Edit rendered' : 'Ready to play offline', { img: thumb(s), sub: s.title });
     if (p && p.status !== 'error' && s.status === 'error') toast('Download failed', { error: true, sub: s.error || s.title });
   }
-  const sig = JSON.stringify([S.songs.map(s => [s.id, s.status, s.title, s.artist, s.liked, s.thumb]), S.playlists]);
+  const sig = JSON.stringify([S.songs.map(s => [s.id, s.status, s.title, s.artist, s.liked, s.thumb, s.thumbVer]), S.playlists]);
   if (force || sig !== S.sig) {
     S.sig = sig;
     renderSidebar();
@@ -203,11 +204,11 @@ function viewHome() {
     ${busy.length ? `<div class="section-head"><h2>Downloading</h2><a href="#/downloads">See all</a></div>
       <div class="row-scroll stagger">${busy.slice(0, 12).map((s, i) => card(s, i)).join('')}</div>` : ''}
     <div class="section-head"><h2>Recently added</h2><a href="#/library">Show all</a></div>
-    <div class="row-scroll stagger" data-ctx="recent">${recent.map((s, i) => card(s, i)).join('')}</div>
+    ${Tapes.on ? Tapes.row(recent) : `<div class="row-scroll stagger" data-ctx="recent">${recent.map((s, i) => card(s, i)).join('')}</div>`}
     ${S.playlists.length ? `<div class="section-head"><h2>Your playlists</h2></div>
       <div class="cards stagger">${S.playlists.map((p, i) => plCard(p, i)).join('')}</div>` : ''}
     ${top.length > 2 ? `<div class="section-head"><h2>On repeat</h2></div>
-      <div class="row-scroll stagger" data-ctx="top">${top.map((s, i) => card(s, i)).join('')}</div>` : ''}`;
+      ${Tapes.on ? Tapes.row(top) : `<div class="row-scroll stagger" data-ctx="top">${top.map((s, i) => card(s, i)).join('')}</div>`}` : ''}`;
 }
 
 function ring(s) {
@@ -264,6 +265,7 @@ function songRow(s, i, opts = {}) {
 }
 function songList(songs, opts = {}) {
   currentList = songs.filter(ready).map(s => s.id);
+  if (Tapes.on && !opts.forceList) return Tapes.shelf(songs, opts);
   return `<div class="list" data-list ${opts.playlist ? `data-playlist="${opts.playlist}"` : ''}>
     <div class="list-head"><span style="text-align:center">#</span><span>Title</span><span class="c-album">Plays</span><span class="c-added">Added</span><span style="text-align:right">${icon('clock')}</span><span></span></div>
     <div class="stagger">${songs.map((s, i) => songRow(s, i, opts)).join('')}</div></div>`;
@@ -298,8 +300,8 @@ function viewDownloads() {
   return `<div class="collection-head"><div class="big-cover liked" style="background:linear-gradient(135deg,#0ea5e9,#8b5cf6 60%,#ec4899)">${icon('download')}</div>
     <div class="ch-text"><div class="ch-kicker">Background</div><h1 class="ch-title">Downloads</h1>
     <div class="ch-meta">${busy.length ? `${busy.length} in progress` : 'All caught up — everything is saved offline'} · <span title="Library folder">${esc(S.dataDir)}</span></div></div></div>
-    ${busy.length ? `<div class="section-head"><h2>In progress</h2></div>${songList(busy)}` : ''}
-    <div class="section-head"><h2>Completed</h2></div>${done.length ? songList(done) : '<p style="color:var(--muted)">Nothing downloaded yet.</p>'}`;
+    ${busy.length ? `<div class="section-head"><h2>In progress</h2></div>${songList(busy, { forceList: true })}` : ''}
+    <div class="section-head"><h2>Completed</h2></div>${done.length ? songList(done, { forceList: true }) : '<p style="color:var(--muted)">Nothing downloaded yet.</p>'}`;
 }
 
 function viewSearch() {
@@ -375,12 +377,12 @@ view.addEventListener('click', async e => {
     if (act === 'like' && id) return toggleLike(id, actEl);
     if (act === 'menu' && id) return songMenu(id, e.clientX, e.clientY);
     if (act === 'retry' && id) { await api.retry(id); return refresh(true); }
-    if (act === 'play-pl') { const p = S.playlists.find(p => p.id === actEl.dataset.pl); return Player.playList(p.songs.filter(i => ready(S.byId[i])), 0); }
+    if (act === 'play-pl') { const p = S.playlists.find(p => p.id === actEl.dataset.pl); return startPlayback(p.songs.filter(i => ready(S.byId[i])), 0, actEl.closest('.card')); }
     if (act === 'pl-menu') return playlistMenu(actEl.dataset.pl, e.clientX, e.clientY);
-    if (act === 'play-all') return Player.playList(currentList, 0);
-    if (act === 'shuffle-all') { Player.setShuffle(true); return Player.playList(currentList, Math.floor(Math.random() * currentList.length)); }
+    if (act === 'play-all') return startPlayback(currentList, 0, firstTape(currentList[0]));
+    if (act === 'shuffle-all') { Player.setShuffle(true); const i = Math.floor(Math.random() * currentList.length); return startPlayback(currentList, i, firstTape(currentList[i])); }
   }
-  if (item && item.classList.contains('card') && ready(S.byId[id])) return playFromView(id, item);
+  if (item && (item.classList.contains('card') || item.classList.contains('tape-cell')) && ready(S.byId[id])) return playFromView(id, item);
   if (item && item.classList.contains('quick-item')) return playFromView(id, item);
   if (item && item.classList.contains('song')) { $$('.song.selected').forEach(x => x.classList.remove('selected')); item.classList.add('selected'); }
 });
@@ -394,14 +396,24 @@ view.addEventListener('contextmenu', e => {
   if (plc) { e.preventDefault(); playlistMenu(plc.dataset.plCard, e.clientX, e.clientY); }
 });
 function playFromView(id, el) {
-  if (Player.current === id) return Player.toggle();
+  if (Player.current === id) { if (Tapes.on && !Tapes.isOpen()) { Tapes.openDeck(); if (audio.paused) Player.play(); return; } return Player.toggle(); }
   // build context from the surrounding container
-  const container = el.closest('[data-list], .row-scroll, .quick, .cards') || view;
+  const container = el.closest('[data-list], .row-scroll, .tape-row, .quick, .cards') || view;
   let ids = $$('[data-id]', container).map(x => x.dataset.id).filter(i => ready(S.byId[i]));
   ids = [...new Set(ids)];
   if (!ids.includes(id)) ids = [id];
-  Player.playList(ids, ids.indexOf(id));
+  startPlayback(ids, ids.indexOf(id), el);
 }
+/** Start a list; in tape mode the tape flies into the deck first. */
+function startPlayback(ids, start = 0, fromEl = null) {
+  ids = ids.filter(i => ready(S.byId[i])); if (!ids.length) return;
+  start = Math.max(0, Math.min(start, ids.length - 1));
+  if (!Tapes.on) return Player.playList(ids, start);
+  ensureAudioGraph();  // inside the click, so audio is allowed to start after the animation
+  if (!audio.paused) audio.pause();
+  Tapes.insert(fromEl, ids[start], () => Player.playList(ids, start));
+}
+const firstTape = id => id && $(`#view .tape-cell[data-id="${id}"]`);
 async function toggleLike(id, btn) {
   const s = S.byId[id]; if (!s) return;
   s.liked = !s.liked;
@@ -479,7 +491,7 @@ function songMenu(id, x, y) {
   const inPl = S.route.name === 'playlist' ? S.playlists.find(p => p.id === S.route.arg) : null;
   const items = [];
   if (r) items.push(
-    { icon: 'play', label: 'Play', action: () => Player.playList([id], 0) },
+    { icon: 'play', label: 'Play', action: () => startPlayback([id], 0, $(`#view [data-id="${id}"]`)) },
     { icon: 'playNext', label: 'Play next', action: () => { Player.playNext(id); toast('Playing next', { img: thumb(s), sub: s.title }); } },
     { icon: 'queue', label: 'Add to queue', action: () => { Player.enqueue(id); toast('Added to queue', { img: thumb(s), sub: s.title }); } },
     { icon: 'listPlus', label: 'Add to playlist', sub: () => [
@@ -490,6 +502,8 @@ function songMenu(id, x, y) {
     { icon: s.liked ? 'heartFill' : 'heart', label: s.liked ? 'Remove from Liked' : 'Like', action: () => toggleLike(id) },
   );
   items.push({ icon: 'edit', label: 'Rename…', action: () => renameSong(id) });
+  items.push({ icon: 'image', label: 'Change cover image…', action: () => pickCover(id) });
+  if (s.customThumb) items.push({ icon: 'refresh', label: 'Restore original cover', action: () => resetCover(id) });
   if (r) items.push({ icon: 'download', label: 'Save file to…', action: () => { const a = document.createElement('a'); a.href = `/media/audio/${id}?download=1`; a.click(); } });
   if (s.status === 'error' && s.source === 'youtube') items.push({ icon: 'refresh', label: 'Retry download', action: async () => { await api.retry(id); refresh(true); } });
   items.push('-');
@@ -500,7 +514,7 @@ function songMenu(id, x, y) {
 function playlistMenu(pid, x, y) {
   const p = S.playlists.find(p => p.id === pid); if (!p) return;
   showMenu(x, y, [
-    { icon: 'play', label: 'Play', action: () => Player.playList(p.songs.filter(i => ready(S.byId[i])), 0) },
+    { icon: 'play', label: 'Play', action: () => startPlayback(p.songs, 0) },
     { icon: 'queue', label: 'Add to queue', action: () => { p.songs.forEach(i => ready(S.byId[i]) && Player.enqueue(i)); toast('Added to queue', { sub: p.name }); } },
     { icon: 'edit', label: 'Rename…', action: async () => { const n = await promptModal('Rename playlist', 'Name', p.name); if (n) { await api.patchPl(pid, { name: n }); refresh(true); } } },
     '-',
@@ -677,7 +691,7 @@ $('#pPrev').onclick = () => Player.prev();
 $('#pShuffle').onclick = () => Player.setShuffle(!Player.shuffle);
 $('#pRepeat').onclick = () => Player.cycleRepeat();
 $('#pLike').onclick = () => Player.current && toggleLike(Player.current, $('#pLike'));
-$('#pArt').onclick = () => Player.current && openNP();
+$('#pArt').onclick = () => Player.current && (Tapes.on ? Tapes.openDeck() : openNP());
 $$('.np [data-act]').forEach(b => b.onclick = () => ({ play: () => Player.toggle(), next: () => Player.next(), prev: () => Player.prev(), shuffle: () => Player.setShuffle(!Player.shuffle), repeat: () => Player.cycleRepeat() })[b.dataset.act]());
 
 const seek = makeRange($('#pSeek'), { onInput: f => { $('#pCur').textContent = fmt(f * (audio.duration || 0)); }, onCommit: f => { if (audio.duration) audio.currentTime = f * audio.duration; } });
@@ -703,6 +717,7 @@ function syncPlayState() {
   const playing = !audio.paused;
   $$('#pPlay, .np [data-act="play"]').forEach(b => b.innerHTML = icon(playing ? 'pause' : 'play'));
   document.body.classList.toggle('paused', !playing);
+  Tapes.sync();
   if ('mediaSession' in navigator) navigator.mediaSession.playbackState = playing ? 'playing' : 'paused';
   document.title = playing && Player.current ? `${S.byId[Player.current]?.title} · MuGo` : 'MuGo';
   markPlaying();
@@ -718,6 +733,7 @@ let lastSave = 0;
     drawViz();
   }
   if (audio.buffered.length && d) { const b = audio.buffered.end(audio.buffered.length - 1) / d; seek.buf(b); npSeek.buf(b); }
+  if (Tapes.isOpen()) Tapes.frame(t, d, !audio.paused);
   if (performance.now() - lastSave > 4000) { lastSave = performance.now(); if (Player.current) Player.save(); }
   requestAnimationFrame(tick);
 })();
@@ -733,6 +749,7 @@ function updatePlayerMeta(changed) {
   $('.np-title').textContent = s.title; $('.np-artist').textContent = s.artist || 'Unknown artist';
   if (s.thumb) { $('.np-art').src = thumb(s); $('.np-bg img').src = thumb(s); }
   if (changed) {
+    Tapes.trackChanged(s.id);
     if (s.thumb) extractColor(thumb(s)); else setDyn([167, 139, 250], [244, 114, 182]);
     if ('mediaSession' in navigator) {
       navigator.mediaSession.metadata = new MediaMetadata({ title: s.title, artist: s.artist || '', album: 'MuGo',
@@ -830,7 +847,83 @@ function drawViz() {
   bass /= Math.max(1, bars / 8);
   const glow = $('.np-glow'); glow.style.transform = `scale(${1 + bass * .18})`; glow.style.opacity = .35 + bass * .6;
   $('.np-art').style.transform = `scale(${1 + bass * .025})`;
+  shakeFrame(bass);
 }
+
+/* ---------------- aggressive shakes ---------------- */
+const shake = { on: store.get('shakes', false), slow: 0, amp: 0, kick: 0 };
+function shakeFrame(bass) {
+  const wrap = $('.np-art-wrap'), body = $('.np-body');
+  if (!shake.on || audio.paused || !freq) { wrap.style.transform = ''; body.style.transform = ''; shake.amp = 0; return; }
+  let e = 0; for (let i = 0; i < freq.length; i++) e += freq[i]; e /= freq.length * 255;
+  shake.slow = shake.slow * .96 + e * .04;                    // running average loudness
+  const hit = Math.max(0, e - shake.slow * 1.06);              // sudden jump = drum hit / drop
+  const target = Math.min(1, hit * 10 + Math.max(0, bass - .55) * 2.4 + Math.max(0, e - .45) * 1.2);
+  shake.amp = target > shake.amp ? target : shake.amp * .86;   // instant attack, smooth release
+  const a = shake.amp, r = () => (Math.random() - .5) * 2;
+  const x = r() * a * 36, y = r() * a * 28, rot = r() * a * 6;
+  wrap.style.transform = `translate(${x}px, ${y}px) rotate(${rot}deg) scale(${1 + a * .08})`;
+  body.style.transform = a > .45 ? `translate(${x * .22}px, ${y * .22}px)` : '';
+  $('.np-glow').style.opacity = Math.min(1, .35 + bass * .6 + a * .5);
+}
+function setShakes(v) {
+  shake.on = v; store.set('shakes', v);
+  $('#shakeToggle').classList.toggle('on', v); $('#np').classList.toggle('shaking', v);
+}
+$('#shakeToggle').onclick = () => { setShakes(!shake.on); toast(shake.on ? 'Aggressive shakes ON 💥' : 'Aggressive shakes off'); };
+setShakes(shake.on);
+
+/* ---------------- tape mode toggle ---------------- */
+function syncTapeToggle() { $('#tapeToggle').classList.toggle('on', Tapes.on); }
+$('#tapeToggle').onclick = () => {
+  Tapes.setOn(!Tapes.on); syncTapeToggle(); render(true);
+  toast(Tapes.on ? 'Tape mode on 📼' : 'Tape mode off', { sub: Tapes.on ? 'Click a tape to load it into the deck' : '' });
+};
+syncTapeToggle();
+
+/* ---------------- custom cover images ---------------- */
+const coverInput = $('#coverInput');
+let coverFor = null;
+function pickCover(id) { coverFor = id; coverInput.value = ''; coverInput.click(); }
+coverInput.onchange = () => { if (coverFor && coverInput.files[0]) uploadCover(coverFor, coverInput.files[0]); };
+async function uploadCover(id, file) {
+  if (!file.type.startsWith('image/')) return toast('Please choose an image file', { error: true });
+  if (file.size > 24 * 1024 * 1024) return toast('That image is too big (max 24 MB)', { error: true });
+  const fd = new FormData(); fd.append('image', file);
+  try {
+    const r = await fetch(`/api/songs/${id}/thumb`, { method: 'POST', body: fd });
+    const song = await r.json();
+    if (!r.ok) throw new Error(song.error || 'Upload failed');
+    S.byId[id] = song;
+    toast('Cover updated', { img: thumb(song), sub: song.title });
+    await refresh(true);
+    if (Player.current === id) updatePlayerMeta(true);
+  } catch (e) { toast(e.message, { error: true }); }
+}
+async function resetCover(id) {
+  try { const s = await req('DELETE', `/api/songs/${id}/thumb`); toast('Original cover restored', { img: thumb(s), sub: s.title }); await refresh(true); if (Player.current === id) updatePlayerMeta(true); }
+  catch (e) { toast(e.message, { error: true }); }
+}
+// drop an image file onto any song (row, card, tape) or onto the now-playing artwork
+const isFileDrag = e => [...(e.dataTransfer?.types || [])].includes('Files');
+function coverTarget(e) {
+  const el = e.target.closest?.('#view [data-id], .np-art-wrap, #pArt');
+  if (!el) return null;
+  return { el, id: el.dataset?.id || Player.current };
+}
+document.addEventListener('dragover', e => {
+  if (!isFileDrag(e)) return;
+  const t = coverTarget(e); $$('.cover-drop').forEach(x => x !== t?.el && x.classList.remove('cover-drop'));
+  if (t?.id) { e.preventDefault(); t.el.classList.add('cover-drop'); }
+});
+document.addEventListener('drop', e => {
+  if (!isFileDrag(e)) return;
+  const t = coverTarget(e); $$('.cover-drop').forEach(x => x.classList.remove('cover-drop'));
+  if (!t?.id) return;
+  e.preventDefault(); e.stopPropagation();
+  const f = [...e.dataTransfer.files].find(f => f.type.startsWith('image/'));
+  if (f) uploadCover(t.id, f); else toast('Drop an image file to use it as the cover', { error: true });
+}, true);
 
 /* ---------------- now playing overlay ---------------- */
 function openNP() { $('#np').hidden = false; $('#np').classList.remove('closing'); updatePlayerMeta(false); }
@@ -873,8 +966,10 @@ document.addEventListener('keydown', e => {
   else if (e.key.toLowerCase() === 's') Player.setShuffle(!Player.shuffle);
   else if (e.key.toLowerCase() === 'r') Player.cycleRepeat();
   else if (e.key.toLowerCase() === 'm') $('#pMute').click();
-  else if (e.key.toLowerCase() === 'f' && Player.current) $('#np').hidden ? openNP() : closeNP();
-  else if (e.key === 'Escape') { if (!$('#np').hidden) closeNP(); hideMenu(); }
+  else if (e.key.toLowerCase() === 'f' && Player.current) { if (Tapes.on) Tapes.isOpen() ? Tapes.close() : Tapes.openDeck(); else $('#np').hidden ? openNP() : closeNP(); }
+  else if (e.key.toLowerCase() === 't') $('#tapeToggle').click();
+  else if (e.key.toLowerCase() === 'x' && !$('#np').hidden) $('#shakeToggle').click();
+  else if (e.key === 'Escape') { if (Tapes.isOpen()) Tapes.close(); else if (!$('#np').hidden) closeNP(); hideMenu(); }
 });
 
 /* ---------------- boot ---------------- */

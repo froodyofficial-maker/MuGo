@@ -45,6 +45,13 @@ const ICONS = {
   wave: '<path d="M2 12h2M6 8v8M10 4v16M14 7v10M18 10v4M22 12h0"/>',
   grip: '<circle fill="currentColor" cx="9" cy="6" r="1.3"/><circle fill="currentColor" cx="15" cy="6" r="1.3"/><circle fill="currentColor" cx="9" cy="12" r="1.3"/><circle fill="currentColor" cx="15" cy="12" r="1.3"/><circle fill="currentColor" cx="9" cy="18" r="1.3"/><circle fill="currentColor" cx="15" cy="18" r="1.3"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  cassette: '<rect x="2.5" y="5" width="19" height="14" rx="2"/><circle cx="8" cy="11" r="2"/><circle cx="16" cy="11" r="2"/><path d="M10 11h4M6.5 19l1.5-3h8l1.5 3"/>',
+  image: '<rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/>',
+  bolt: '<path fill="currentColor" stroke="none" d="M13 2 4.5 13.5H11L10 22l8.5-11.5H12z"/>',
+  eject: '<path fill="currentColor" stroke="none" d="M12 5 4.5 14h15z"/><rect fill="currentColor" stroke="none" x="4.5" y="16.5" width="15" height="2.6" rx="1"/>',
+  stop: '<rect fill="currentColor" stroke="none" x="6" y="6" width="12" height="12" rx="1.5"/>',
+  ffwd: '<path fill="currentColor" stroke="none" d="M3 6v12l9-6zM12 6v12l9-6z"/>',
+  rew: '<path fill="currentColor" stroke="none" d="M21 6v12l-9-6zM12 6v12l-9-6z"/>',
   disc: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/>',
 };
 function icon(name, cls = '') {

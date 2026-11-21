@@ -46,6 +46,10 @@ jobs:
           Invoke-WebRequest https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip -OutFile tmp/deno.zip
           Expand-Archive tmp/deno.zip bin
           Get-ChildItem bin | Format-Table Name, Length
+          $f = & bin\ffmpeg.exe -hide_banner -filters
+          foreach ($need in 'rubberband', 'afir', 'atempo') { if (-not ($f | Select-String " $need ")) { throw "bundled ffmpeg is missing $need" } }
+          if (-not ((& bin\ffmpeg.exe -hide_banner -buildconf) | Select-String 'libsoxr')) { throw 'bundled ffmpeg is missing soxr' }
+          Write-Host 'ffmpeg has rubberband, afir and soxr'
 
       - name: Build MuGo.exe
         run: >

@@ -25,11 +25,21 @@ Double-click it, and MuGo opens. That's it: ffmpeg and the YouTube downloader ar
 - **Player.** Shuffle, repeat (all/one), queue, play next, likes, seek, volume, media keys and lock-screen controls.
 - **Now Playing view** with a blurred-art backdrop, a live audio visualizer and artwork that pulses on the beat.
 - **Ambient colors.** The app's glow follows the colors of the current song's thumbnail.
+- **📼 Tape mode (optional):** turn it on in the sidebar (or press `T`) and your music becomes 3D cassettes on a shelf, with each song's artwork printed on its label. They tilt toward your mouse. Pick one and it flies into a cassette deck: the door opens, the tape spins in, the door clunks shut, PLAY goes down, and the song starts. The deck has spinning reels that wind from one spool to the other, analog VU meters, pumping speakers and a glowing display. **REC** opens the song in the Studio.
+- **💥 Aggressive shakes:** in the full-screen Now Playing view, toggle it (or press `X`) and the artwork shakes harder the louder and punchier the music gets.
+- **Custom covers:** right-click a song → *Change cover image…*, or drop an image file onto any song. *Restore original cover* brings the YouTube art back.
 - **Studio (music editor):**
   - Drag on the waveform to select a part, then **Cut out**, **Keep only this** (trim) or **change its speed** (0.5×–1.5×).
-  - Choose **Natural** (pitch preserved) or **Vinyl** (pitch follows the speed, for the classic "slowed" sound).
+  - **Natural** uses a studio-grade time-stretch engine ([Rubber Band](https://breakfastquay.com/rubberband/), the kind DAWs use): tempo changes while pitch, formants and the stereo image stay natural.
+  - **Vinyl** is true varispeed through a high-precision soxr resampler, like slowing a turntable: pitch drops with the speed, for the classic "slowed" sound.
+  - Optional **convolution reverb** (Room / Hall / Dreamy) for that slowed + reverb sound, with a limiter so nothing clips. Edits are saved as 256 kbps AAC.
+  - **Hi-Fi preview** renders the edit with the real engine so you hear exactly what will be saved. The quick preview is instant but only approximates the sound.
   - Set fade in/out, undo/redo, zoom (`Ctrl`+scroll) and preview the edit live before saving.
   - **Save as new song** renders it with ffmpeg into your library. The original is kept.
+
+| Tape mode | The deck |
+|---|---|
+| ![](docs/tapes.png) | ![](docs/deck.png) |
 
 | Playlist | Now playing | Studio |
 |---|---|---|
@@ -78,7 +88,8 @@ Tip: in Chrome or Edge, use **⋮ → Cast, save and share → Install page as a
 | `Space` | play / pause (in Studio: preview the edit) |
 | `←` `→` | seek 5 s · `Shift` + arrows: previous / next track |
 | `↑` `↓` | volume |
-| `L` `S` `R` `M` `F` | like · shuffle · repeat · mute · full-screen now playing |
+| `L` `S` `R` `M` `F` | like · shuffle · repeat · mute · full-screen now playing (or the deck in tape mode) |
+| `T` · `X` | tape mode on/off · aggressive shakes (in full-screen) |
 | `/` | focus the "add link" bar |
 | Studio: `Del` `K` `Esc` `Ctrl+Z` `+`/`−` | cut selection · keep only selection · clear selection · undo · zoom |
 

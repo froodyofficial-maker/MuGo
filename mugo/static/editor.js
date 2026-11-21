@@ -25,12 +25,12 @@ const Studio = (() => {
     stop();
     st = {
       id, song, dur: song.duration || 0, peaks: null, segs: [], sel: null, hist: [], fut: [],
-      zoom: 1, pitch: 'keep', fadeIn: 0, fadeOut: 0, playhead: 0, titleTouched: false, hover: null,
+      zoom: 1, pitch: 'keep', reverb: '', fadeIn: 0, fadeOut: 0, playhead: 0, titleTouched: false, hover: null,
     };
     renderShell();
     load();
   }
-  function unmount() { if (st) stop(); }
+  function unmount() { if (st) stop(); hqStop(); }
 
   function renderPicker() {
     const songs = S.songs.filter(ready);
@@ -57,8 +57,9 @@ const Studio = (() => {
 
       <div class="panel">
         <div class="st-tools" style="margin:0 0 12px">
-          <button class="play-btn grad" data-s="preview" title="Preview edit (Space)">${icon('play')}</button>
-          <div><div style="font-weight:800;font-size:18px;font-variant-numeric:tabular-nums" data-s="clock">0:00.0</div><div class="sel-label">playhead (original time)</div></div>
+          <button class="play-btn grad" data-s="preview" title="Quick preview (Space)">${icon('play')}</button>
+          <div><div style="font-weight:800;font-size:18px;font-variant-numeric:tabular-nums" data-s="clock">0:00.0</div><div class="sel-label" data-s="clockLbl">quick preview · playhead</div></div>
+          <button class="btn" data-s="hifi" title="Render the edit with the real studio engine and play it">${icon('sparkles')}<span>Hi-Fi preview</span></button>
           <div style="flex:1"></div>
           <button class="icon-btn" data-s="undo" title="Undo (Ctrl+Z)">${icon('undo')}</button>
           <button class="icon-btn" data-s="redo" title="Redo (Ctrl+Shift+Z)">${icon('redo')}</button>
@@ -106,8 +107,10 @@ const Studio = (() => {
         <div class="panel">
           <h4>Export</h4>
           <div class="opt-row"><div><b>New length</b><small>after cuts and speed changes</small></div><div class="result-len" data-s="len">—</div></div>
-          <div class="opt-row"><div><b>Speed changes</b><small>Natural keeps the pitch · Vinyl lowers/raises it (classic “slowed” sound)</small></div>
+          <div class="opt-row"><div><b>Speed changes</b><small>Natural: studio time-stretch (Rubber Band), tempo changes, pitch &amp; vocals stay natural · Vinyl: true varispeed like a turntable, pitch drops with the speed (the classic “slowed” sound)</small></div>
             <div class="seg-toggle" data-s="pitch"><button data-v="keep" class="on">Natural</button><button data-v="vinyl">Vinyl</button></div></div>
+          <div class="opt-row"><div><b>Reverb</b><small>Convolution reverb, added at render (hear it with Hi-Fi preview)</small></div>
+            <div class="seg-toggle" data-s="reverb"><button data-v="" class="on">Off</button><button data-v="room">Room</button><button data-v="hall">Hall</button><button data-v="dreamy">Dreamy</button></div></div>
           <div class="opt-row"><div><b>Fade in / out</b><small>seconds</small></div><div style="display:flex;gap:8px">
             <input class="num-input" type="number" min="0" max="20" step="0.5" value="0" data-s="fadeIn" title="Fade in">
             <input class="num-input" type="number" min="0" max="20" step="0.5" value="0" data-s="fadeOut" title="Fade out"></div></div>
@@ -305,9 +308,39 @@ const Studio = (() => {
     q('ruler').innerHTML = html;
   }
 
+  /* ---------------- Hi-Fi preview (server render, exact final sound) ---------------- */
+  const hq = new Audio(); hq.preload = 'auto';
+  let hqRaf = 0;
+  function hqStop() {
+    hq.pause(); cancelAnimationFrame(hqRaf);
+    const b = root?.querySelector('[data-s="hifi"]');
+    if (b) { b.disabled = false; b.innerHTML = `${icon('sparkles')}<span>Hi-Fi preview</span>`; }
+    const l = root?.querySelector('[data-s="clockLbl"]'); if (l) l.textContent = 'quick preview · playhead';
+    if (st?.peaks && root?.contains(root.querySelector('[data-s="clock"]'))) draw();
+  }
+  async function hifi() {
+    if (!st?.peaks) return;
+    if (!hq.paused) return hqStop();
+    stop(); if (!audio.paused) Player.pause();
+    const segs = kept().map(s => ({ start: +s.start.toFixed(3), end: +s.end.toFixed(3), speed: s.speed }));
+    if (!segs.length) return toast('Everything is cut — nothing to play', { error: true });
+    const b = q('hifi'); b.disabled = true; b.innerHTML = `<span class="mini-bar indet" style="width:60px"><div></div></span><span>Rendering…</span>`;
+    try {
+      const r = await api.preview({ source: st.id, segments: segs, pitch: st.pitch, reverb: st.reverb, fadeIn: st.fadeIn, fadeOut: st.fadeOut });
+      if (!q('hifi')) return;
+      hq.src = r.url; await hq.play();
+      b.disabled = false; b.innerHTML = `${icon('stop')}<span>Stop Hi-Fi</span>`;
+      q('clockLbl').textContent = 'Hi-Fi preview · final render';
+      const tick = () => { if (hq.paused || !q('clock')) return hqStop(); q('clock').textContent = `${fmt(hq.currentTime)} / ${fmt(hq.duration || r.duration)}`; hqRaf = requestAnimationFrame(tick); };
+      tick();
+    } catch (e) { toast(e.message, { error: true }); hqStop(); }
+  }
+  hq.addEventListener('ended', hqStop);
+
   /* ---------------- preview playback ---------------- */
   function startPreview(from, until = null) {
     if (!st?.peaks) return;
+    if (!hq.paused) hqStop();
     if (!audio.paused) Player.pause();
     let t = from ?? st.playhead;
     if (t >= st.dur - 0.05) t = 0;
@@ -395,6 +428,7 @@ const Studio = (() => {
       if (row) { const [a, bb] = row.dataset.seg.split('|').map(Number); st.sel = { a, b: bb }; st.playhead = a; update(); return; }
       if (!k) return;
       if (k === 'preview') return pa.paused ? startPreview() : stop();
+      if (k === 'hifi') return hifi();
       if (k === 'undo') return undo();
       if (k === 'redo') return redo();
       if (k === 'zoomIn') return zoom(1.5);
@@ -422,6 +456,10 @@ const Studio = (() => {
       st.pitch = b.dataset.v; q('pitch').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
       pa.preservesPitch = pa.mozPreservesPitch = pa.webkitPreservesPitch = st.pitch === 'keep';
     });
+    q('reverb').addEventListener('click', e => {
+      const b = e.target.closest('button'); if (!b) return;
+      st.reverb = b.dataset.v; q('reverb').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    });
     q('fadeIn').addEventListener('input', e => st.fadeIn = Math.max(0, +e.target.value || 0));
     q('fadeOut').addEventListener('input', e => st.fadeOut = Math.max(0, +e.target.value || 0));
     q('title').addEventListener('input', () => st.titleTouched = true);
@@ -442,7 +480,7 @@ const Studio = (() => {
     if (!segs.length) return toast('Everything is cut — nothing to save', { error: true });
     const btn = q('save'); btn.disabled = true;
     try {
-      const song = await api.edit({ source: st.id, segments: segs, pitch: st.pitch, fadeIn: st.fadeIn, fadeOut: st.fadeOut, title: q('title').value.trim() });
+      const song = await api.edit({ source: st.id, segments: segs, pitch: st.pitch, reverb: st.reverb, fadeIn: st.fadeIn, fadeOut: st.fadeOut, title: q('title').value.trim() });
       toast('Rendering your edit…', { img: thumb(st.song), sub: song.title });
       refresh(true);
     } catch (e) { toast(e.message, { error: true }); }
