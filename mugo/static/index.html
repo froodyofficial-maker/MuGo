@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MuGo</title>
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="ambient" aria-hidden="true">
+  <div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div>
+  <div class="grain"></div>
+</div>
+
+<div class="app">
+  <!-- ============ SIDEBAR ============ -->
+  <aside class="sidebar">
+    <a class="logo" href="#/" data-nav>
+      <span class="logo-mark"><svg viewBox="0 0 32 32"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#a78bfa"/><stop offset=".55" stop-color="#f472b6"/><stop offset="1" stop-color="#fb923c"/></linearGradient></defs><rect width="32" height="32" rx="9" fill="url(#lg)"/><path d="M12 22.5a3 3 0 1 1-2-2.83V9.5l12-2.5v12a3 3 0 1 1-2-2.83V10.2l-8 1.7z" fill="#fff"/></svg></span>
+      <span class="logo-text">MuGo</span>
+    </a>
+    <nav class="nav">
+      <a href="#/" data-route="home"><i data-icon="home"></i><span>Home</span></a>
+      <a href="#/library" data-route="library"><i data-icon="library"></i><span>Library</span></a>
+      <a href="#/liked" data-route="liked"><i data-icon="heart"></i><span>Liked</span></a>
+      <a href="#/downloads" data-route="downloads"><i data-icon="download"></i><span>Downloads</span><b class="badge" id="dlBadge" hidden></b></a>
+      <a href="#/editor" data-route="editor"><i data-icon="scissors"></i><span>Studio</span></a>
+    </nav>
+    <div class="side-head">
+      <span>Playlists</span>
+      <button class="icon-btn sm" id="newPlaylistBtn" title="New playlist"><i data-icon="plus"></i></button>
+    </div>
+    <div class="playlists" id="sidePlaylists"></div>
+    <div class="side-foot" id="sideFoot"></div>
+  </aside>
+
+  <!-- ============ MAIN ============ -->
+  <main class="main" id="main">
+    <header class="topbar">
+      <form class="addbar" id="addForm" autocomplete="off">
+        <i data-icon="link"></i>
+        <input id="addInput" placeholder="Paste a YouTube link to add it to your library…" spellcheck="false">
+        <kbd>/</kbd>
+        <button class="btn primary" type="submit"><i data-icon="plus"></i><span>Add</span></button>
+      </form>
+      <div class="search">
+        <i data-icon="search"></i>
+        <input id="searchInput" placeholder="Search your music" spellcheck="false">
+      </div>
+    </header>
+    <section class="view" id="view"></section>
+  </main>
+
+  <!-- ============ PLAYER BAR ============ -->
+  <footer class="player" id="player">
+    <div class="p-now">
+      <button class="p-art" id="pArt" title="Open now playing"><img alt=""><span class="p-art-expand"><i data-icon="expand"></i></span></button>
+      <div class="p-meta">
+        <div class="p-title" id="pTitle">Nothing playing</div>
+        <div class="p-artist" id="pArtist">Paste a link to get started</div>
+      </div>
+      <button class="icon-btn like" id="pLike" title="Like (L)"><i data-icon="heart"></i></button>
+    </div>
+    <div class="p-center">
+      <div class="p-controls">
+        <button class="icon-btn" id="pShuffle" title="Shuffle (S)"><i data-icon="shuffle"></i></button>
+        <button class="icon-btn" id="pPrev" title="Previous"><i data-icon="prev"></i></button>
+        <button class="play-btn" id="pPlay" title="Play / Pause (Space)"><i data-icon="play"></i></button>
+        <button class="icon-btn" id="pNext" title="Next"><i data-icon="next"></i></button>
+        <button class="icon-btn" id="pRepeat" title="Repeat (R)"><i data-icon="repeat"></i></button>
+      </div>
+      <div class="p-seek">
+        <span id="pCur">0:00</span>
+        <div class="range" id="pSeek"><div class="range-buf"></div><div class="range-fill"></div><div class="range-thumb"></div></div>
+        <span id="pDur">0:00</span>
+      </div>
+    </div>
+    <div class="p-right">
+      <button class="icon-btn" id="pQueueBtn" title="Queue"><i data-icon="queue"></i></button>
+      <button class="icon-btn" id="pMute" title="Mute (M)"><i data-icon="volume"></i></button>
+      <div class="range vol" id="pVol"><div class="range-fill"></div><div class="range-thumb"></div></div>
+    </div>
+  </footer>
+</div>
+
+<!-- ============ NOW PLAYING (fullscreen) ============ -->
+<div class="np" id="np" hidden>
+  <div class="np-bg"><img alt=""></div>
+  <button class="icon-btn np-close" id="npClose" title="Close (Esc)"><i data-icon="chevronDown"></i></button>
+  <div class="np-body">
+    <div class="np-art-wrap">
+      <div class="np-glow"></div>
+      <img class="np-art" alt="">
+    </div>
+    <div class="np-info">
+      <div class="np-label">Now playing</div>
+      <h1 class="np-title"></h1>
+      <div class="np-artist"></div>
+      <canvas class="np-viz" id="npViz"></canvas>
+      <div class="p-seek np-seek">
+        <span class="np-cur">0:00</span>
+        <div class="range" id="npSeek"><div class="range-buf"></div><div class="range-fill"></div><div class="range-thumb"></div></div>
+        <span class="np-dur">0:00</span>
+      </div>
+      <div class="p-controls np-controls">
+        <button class="icon-btn" data-act="shuffle"><i data-icon="shuffle"></i></button>
+        <button class="icon-btn lg" data-act="prev"><i data-icon="prev"></i></button>
+        <button class="play-btn xl" data-act="play"><i data-icon="play"></i></button>
+        <button class="icon-btn lg" data-act="next"><i data-icon="next"></i></button>
+        <button class="icon-btn" data-act="repeat"><i data-icon="repeat"></i></button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ QUEUE DRAWER ============ -->
+<aside class="drawer" id="queueDrawer" hidden>
+  <div class="drawer-head"><h3>Up next</h3><button class="icon-btn sm" id="queueClose"><i data-icon="close"></i></button></div>
+  <div class="drawer-body" id="queueList"></div>
+</aside>
+
+<div class="menu" id="menu" hidden></div>
+<div class="modal-wrap" id="modal" hidden></div>
+<div class="toasts" id="toasts"></div>
+<div class="drop-hint" id="dropHint" hidden><div><i data-icon="link"></i><p>Drop a YouTube link to add it</p></div></div>
+
+<audio id="audio" preload="auto" crossorigin="anonymous"></audio>
+<script src="/static/icons.js"></script>
+<script src="/static/app.js"></script>
+<script src="/static/editor.js"></script>
+</body>
+</html>
