@@ -25,7 +25,7 @@ const Studio = (() => {
     stop();
     st = {
       id, song, dur: song.duration || 0, peaks: null, segs: [], sel: null, hist: [], fut: [],
-      zoom: 1, pitch: 'keep', reverb: '', fadeIn: 0, fadeOut: 0, playhead: 0, titleTouched: false, hover: null,
+      zoom: 1, pitch: store.get('studioPitch', 'vinyl'), semitones: 0, warm: false, reverb: '', fadeIn: 0, fadeOut: 0, playhead: 0, titleTouched: false, hover: null,
     };
     renderShell();
     load();
@@ -107,8 +107,12 @@ const Studio = (() => {
         <div class="panel">
           <h4>Export</h4>
           <div class="opt-row"><div><b>New length</b><small>after cuts and speed changes</small></div><div class="result-len" data-s="len">—</div></div>
-          <div class="opt-row"><div><b>Speed changes</b><small>Natural: studio time-stretch (Rubber Band), tempo changes, pitch &amp; vocals stay natural · Vinyl: true varispeed like a turntable, pitch drops with the speed (the classic “slowed” sound)</small></div>
-            <div class="seg-toggle" data-s="pitch"><button data-v="keep" class="on">Natural</button><button data-v="vinyl">Vinyl</button></div></div>
+          <div class="opt-row"><div><b>When slowing down</b><small><b>Deeper</b>: like slowing a record, so the pitch and tone drop with the speed (the classic “slowed” sound) · <b>Keep pitch</b>: only the tempo changes (studio time-stretch)</small></div>
+            <div class="seg-toggle" data-s="pitch"><button data-v="vinyl">Deeper</button><button data-v="keep">Keep pitch</button></div></div>
+          <div class="opt-row"><div><b>Extra depth</b><small>Shift the whole song's pitch down (or up) without changing speed. Hear it with Hi-Fi preview</small></div>
+            <div style="display:flex;align-items:center;gap:10px"><input type="range" min="-12" max="6" step="0.5" value="0" data-s="semis" style="width:130px;accent-color:#f472b6"><b data-s="semisVal" style="width:92px;text-align:right;font-variant-numeric:tabular-nums">0 semitones</b></div></div>
+          <div class="opt-row"><div><b>Warm, heavy tone</b><small>Boosts the bass and softens the highs for a darker sound. Hear it with Hi-Fi preview</small></div>
+            <div class="seg-toggle" data-s="warm"><button data-v="0" class="on">Off</button><button data-v="1">On</button></div></div>
           <div class="opt-row"><div><b>Reverb</b><small>Convolution reverb, added at render (hear it with Hi-Fi preview)</small></div>
             <div class="seg-toggle" data-s="reverb"><button data-v="" class="on">Off</button><button data-v="room">Room</button><button data-v="hall">Hall</button><button data-v="dreamy">Dreamy</button></div></div>
           <div class="opt-row"><div><b>Fade in / out</b><small>seconds</small></div><div style="display:flex;gap:8px">
@@ -326,7 +330,7 @@ const Studio = (() => {
     if (!segs.length) return toast('Everything is cut — nothing to play', { error: true });
     const b = q('hifi'); b.disabled = true; b.innerHTML = `<span class="mini-bar indet" style="width:60px"><div></div></span><span>Rendering…</span>`;
     try {
-      const r = await api.preview({ source: st.id, segments: segs, pitch: st.pitch, reverb: st.reverb, fadeIn: st.fadeIn, fadeOut: st.fadeOut });
+      const r = await api.preview({ source: st.id, segments: segs, pitch: st.pitch, semitones: st.semitones, warm: st.warm, reverb: st.reverb, fadeIn: st.fadeIn, fadeOut: st.fadeOut });
       if (!q('hifi')) return;
       hq.src = r.url; await hq.play();
       b.disabled = false; b.innerHTML = `${icon('stop')}<span>Stop Hi-Fi</span>`;
@@ -453,8 +457,17 @@ const Studio = (() => {
     selInput('selA'); selInput('selB');
     q('pitch').addEventListener('click', e => {
       const b = e.target.closest('button'); if (!b) return;
-      st.pitch = b.dataset.v; q('pitch').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+      st.pitch = b.dataset.v; store.set('studioPitch', st.pitch); q('pitch').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
       pa.preservesPitch = pa.mozPreservesPitch = pa.webkitPreservesPitch = st.pitch === 'keep';
+    });
+    q('pitch').querySelectorAll('button').forEach(x => x.classList.toggle('on', x.dataset.v === st.pitch));
+    q('semis').addEventListener('input', e => {
+      st.semitones = +e.target.value;
+      q('semisVal').textContent = st.semitones === 0 ? '0 semitones' : `${st.semitones > 0 ? '+' : ''}${st.semitones} semitone${Math.abs(st.semitones) === 1 ? '' : 's'}`;
+    });
+    q('warm').addEventListener('click', e => {
+      const b = e.target.closest('button'); if (!b) return;
+      st.warm = b.dataset.v === '1'; q('warm').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
     });
     q('reverb').addEventListener('click', e => {
       const b = e.target.closest('button'); if (!b) return;
@@ -480,7 +493,7 @@ const Studio = (() => {
     if (!segs.length) return toast('Everything is cut — nothing to save', { error: true });
     const btn = q('save'); btn.disabled = true;
     try {
-      const song = await api.edit({ source: st.id, segments: segs, pitch: st.pitch, reverb: st.reverb, fadeIn: st.fadeIn, fadeOut: st.fadeOut, title: q('title').value.trim() });
+      const song = await api.edit({ source: st.id, segments: segs, pitch: st.pitch, semitones: st.semitones, warm: st.warm, reverb: st.reverb, fadeIn: st.fadeIn, fadeOut: st.fadeOut, title: q('title').value.trim() });
       toast('Rendering your edit…', { img: thumb(st.song), sub: song.title });
       refresh(true);
     } catch (e) { toast(e.message, { error: true }); }

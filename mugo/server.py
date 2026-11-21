@@ -419,6 +419,21 @@ def build_filter(segments: list[dict], opts: dict) -> tuple[str, float]:
         lines.append(f"[in{i}]" + ",".join(chain) + f"[s{i}]")
     lines.append("".join(f"[s{i}]" for i in range(n)) + f"concat=n={n}:v=0:a=1[cat]")
     last = "cat"
+    tone = []
+    semis = max(-12.0, min(12.0, float(opts.get("semitones", 0) or 0)))
+    if abs(semis) > 0.01:  # extra pitch shift (deeper / higher) without changing the tempo
+        ratio = 2 ** (semis / 12)
+        if ff_has("rubberband"):
+            # formants shift with the pitch, so voices really sound deeper, not just "transposed"
+            tone.append(f"rubberband=pitch={ratio:.6f}:tempo=1:transients=mixed:phase=laminar"
+                        ":formant=shifted:pitchq=quality:channels=together")
+        else:
+            tone += [f"asetrate={44100 * ratio:.3f}", f"aresample=44100{rs}", *atempo_chain(1 / ratio)]
+    if opts.get("warm"):  # darker, heavier tone: low-shelf boost + softened highs
+        tone += ["bass=g=5:f=95:w=0.7", "equalizer=f=250:t=q:w=1:g=1.5", "treble=g=-4:f=5500:w=0.6"]
+    if tone:
+        lines.append("[cat]" + ",".join(tone) + "[tone]")
+        last = "tone"
     rev = REVERBS.get(opts.get("reverb") or "")
     if rev:  # convolution reverb with a generated, decorrelated stereo impulse response
         tail, wet, lp = rev
@@ -426,7 +441,7 @@ def build_filter(segments: list[dict], opts: dict) -> tuple[str, float]:
             lines.append(f"anoisesrc=d={tail}:c=pink:r=44100:a=0.9:seed={seed},lowpass=f={lp},"
                          f"afade=t=in:d=0.012,afade=t=out:st=0:d={tail}:curve=exp[ir{ch}]")
         lines.append("[irl][irr]join=inputs=2:channel_layout=stereo[ir]")
-        lines.append("[cat]asplit=2[dry][send]")
+        lines.append(f"[{last}]asplit=2[dry][send]")
         lines.append(f"[send][ir]afir=dry=1:wet=1{afir_norm()}[wet]")
         lines.append(f"[dry][wet]amix=inputs=2:weights=1 {wet}:normalize=0:duration=first[rv]")
         last = "rv"
@@ -711,10 +726,12 @@ def edit():
 
 def edit_opts(body: dict) -> dict:
     return {
-        "pitch": body.get("pitch", "keep"),
+        "pitch": body.get("pitch", "vinyl"),
         "fadeIn": float(body.get("fadeIn", 0) or 0),
         "fadeOut": float(body.get("fadeOut", 0) or 0),
         "reverb": body.get("reverb") if body.get("reverb") in REVERBS else None,
+        "semitones": float(body.get("semitones", 0) or 0),
+        "warm": bool(body.get("warm")),
     }
 
 

@@ -571,3 +571,19 @@ kbd { font: 600 11px ui-monospace, monospace; color: var(--faint); border: 1px s
 }
 
 .cover-drop { outline: 2px dashed var(--a2) !important; outline-offset: 3px; border-radius: 12px; }
+
+/* ---------- aggressive shakes pill (now playing) ---------- */
+.np-pill {
+  position: absolute; top: 22px; right: 22px; z-index: 3;
+  display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 16px; border-radius: 999px;
+  background: rgba(255,255,255,.08); color: rgba(255,255,255,.75); font-weight: 700; font-size: 13px;
+  border: 1px solid rgba(255,255,255,.1); transition: background .25s, color .25s, box-shadow .3s;
+}
+.np-pill:hover { background: rgba(255,255,255,.14); color: #fff; }
+.np-pill.on { background: linear-gradient(135deg, #ef4444, #f97316); color: #fff; border-color: transparent; box-shadow: 0 8px 30px -6px rgba(239, 68, 68, .7); }
+.np-pill.on .ic { animation: zap 1s ease-in-out infinite; }
+@keyframes zap { 50% { transform: scale(1.25) rotate(-8deg); } }
+.np-art-wrap { will-change: transform; }
+.np.shaking .np-art { transition: none; }
+
+@media (max-width: 860px) { .np-pill span { display: none; } }
