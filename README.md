@@ -26,7 +26,7 @@ Double-click it, and MuGo opens. That's it: ffmpeg and the YouTube downloader ar
 - **Now Playing view** with a blurred-art backdrop, a live audio visualizer and artwork that pulses on the beat.
 - **Ambient colors.** The app's glow follows the colors of the current song's thumbnail.
 - **💥 Aggressive shakes:** in the full-screen Now Playing view, toggle it (or press `X`) and the artwork moves with the music on springs. Kick drums give big punches, snares and hats give smaller hits, and the overall loudness adds a gentle sway, so it bounces and settles naturally instead of jittering.
-- **Hide from Home:** right-click a song → *Hide from Home*. It stays in your Library (with an 👁 tag) but no longer shows up on the Home page. *Show on Home* undoes it.
+- **Hide from Home:** right-click a song or a playlist (in the sidebar or on Home) → *Hide from Home*. Songs stay in your Library (with an 👁 tag) and playlists stay in the sidebar, but they no longer appear on the Home page. *Show on Home* undoes it.
 - **Custom covers:** right-click a song → *Change cover image…*, or drop an image file onto any song. *Restore original cover* brings the YouTube art back.
 - **Studio (music editor):**
   - Drag on the waveform to select a part, then **Cut out**, **Keep only this** (trim) or **change its speed** (0.5×–1.5×).
@@ -34,6 +34,7 @@ Double-click it, and MuGo opens. That's it: ffmpeg and the YouTube downloader ar
   - **Keep pitch** changes only the tempo, using the studio-grade [Rubber Band](https://breakfastquay.com/rubberband/) time-stretch engine.
   - **Extra depth** shifts the whole song down (or up) by semitones without changing speed. **Warm, heavy tone** boosts the bass and softens the highs.
   - **Convolution reverb** (Room / Hall / Dreamy) with an **amount** slider, for the slowed + reverb sound: from a subtle space up to an echo as loud as the song. It has pre-delay and a low-cut so the song stays clear, and you hear it live in the quick preview. A limiter keeps everything from clipping, and edits are saved as 256 kbps AAC.
+  - **🎧 8D audio:** the music slowly circles around your head on headphones. It combines left/right movement, a duller sound when it passes behind you, and "head shadow" on the far ear. Use it on the whole song, or select parts and press **8D this part**. The rotation speed is adjustable, and you hear it live in the preview.
   - **Hi-Fi preview** renders the edit with the real engine so you hear exactly what will be saved. The quick preview is instant but only approximates the sound.
   - Set fade in/out, undo/redo, zoom (`Ctrl`+scroll) and preview the edit live before saving.
   - **Save as new song** renders it with ffmpeg into your library. The original is kept.

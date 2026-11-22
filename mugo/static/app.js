@@ -176,6 +176,7 @@ function greeting() {
 function viewHome() {
   const songs = S.songs.filter(s => !s.hidden);
   const hiddenCount = S.songs.length - songs.length;
+  const homePls = S.playlists.filter(p => !p.hidden), hiddenPls = S.playlists.length - homePls.length;
   if (!S.songs.length) return `
     <div class="hero"><div><h1>${greeting()}, <span class="g">let's build your library.</span></h1>
     <p>Everything you add is downloaded to your laptop, so it keeps playing offline.</p></div></div>
@@ -206,8 +207,8 @@ function viewHome() {
       <div class="row-scroll stagger">${busy.slice(0, 12).map((s, i) => card(s, i)).join('')}</div>` : ''}
     <div class="section-head"><h2>Recently added</h2><a href="#/library">Show all</a></div>
     <div class="row-scroll stagger" data-ctx="recent">${recent.map((s, i) => card(s, i)).join('')}</div>
-    ${S.playlists.length ? `<div class="section-head"><h2>Your playlists</h2></div>
-      <div class="cards stagger">${S.playlists.map((p, i) => plCard(p, i)).join('')}</div>` : ''}
+    ${homePls.length ? `<div class="section-head"><h2>Your playlists</h2>${hiddenPls ? `<a href="#/library">${hiddenPls} hidden</a>` : ''}</div>
+      <div class="cards stagger">${homePls.map((p, i) => plCard(p, i)).join('')}</div>` : ''}
     ${top.length > 2 ? `<div class="section-head"><h2>On repeat</h2></div>
       <div class="row-scroll stagger" data-ctx="top">${top.map((s, i) => card(s, i)).join('')}</div>` : ''}`;
 }
@@ -290,7 +291,7 @@ function viewPlaylist(id) {
   const p = S.playlists.find(p => p.id === id);
   if (!p) return `<div class="empty"><div class="bubble">${icon('alert')}</div><h3>Playlist not found</h3><p><a href="#/">Go home</a></p></div>`;
   const songs = p.songs.map(id => S.byId[id]).filter(Boolean);
-  return viewCollection({ kicker: 'Playlist', title: p.name, songs, playlist: p.id, editable: true,
+  return viewCollection({ kicker: p.hidden ? `Playlist · <span title="Not shown on the Home page">${icon('eyeOff')} hidden from Home</span>` : 'Playlist', title: p.name, songs, playlist: p.id, editable: true,
     emptyText: 'Right-click any song → “Add to playlist”, or drag songs onto this playlist in the sidebar.' });
 }
 
@@ -328,7 +329,7 @@ function renderSidebar() {
   $('#sidePlaylists').innerHTML = S.playlists.length ? S.playlists.map(p => `
     <a class="pl-link" href="#/playlist/${p.id}" data-pl="${p.id}" title="${esc(p.name)}">
       <div class="pl-cover">${coverHTML(p.songs)}</div>
-      <div class="pl-text"><div class="pl-name">${esc(p.name)}</div><div class="pl-sub">${p.songs.length} songs</div></div></a>`).join('')
+      <div class="pl-text"><div class="pl-name">${esc(p.name)}</div><div class="pl-sub">${p.songs.length} songs${p.hidden ? ' · hidden from Home' : ''}</div></div></a>`).join('')
     : `<div class="pl-sub" style="padding:6px 12px;line-height:1.5">Create a playlist with the + button.</div>`;
   const n = S.songs.filter(ready).length;
   $('#sideFoot').innerHTML = `${n} songs available offline`;
@@ -356,6 +357,10 @@ sideP.addEventListener('dragover', e => {
   const a = e.target.closest('.pl-link');
   if (!a || ![...e.dataTransfer.types].includes('text/mugo-song')) return;
   e.preventDefault(); $$('.pl-link.drop-target').forEach(x => x !== a && x.classList.remove('drop-target')); a.classList.add('drop-target');
+});
+sideP.addEventListener('contextmenu', e => {
+  const a = e.target.closest('.pl-link'); if (!a) return;
+  e.preventDefault(); playlistMenu(a.dataset.pl, e.clientX, e.clientY);
 });
 sideP.addEventListener('dragleave', e => e.target.closest('.pl-link')?.classList.remove('drop-target'));
 sideP.addEventListener('drop', e => {
@@ -513,6 +518,8 @@ function playlistMenu(pid, x, y) {
     { icon: 'play', label: 'Play', action: () => startPlayback(p.songs, 0) },
     { icon: 'queue', label: 'Add to queue', action: () => { p.songs.forEach(i => ready(S.byId[i]) && Player.enqueue(i)); toast('Added to queue', { sub: p.name }); } },
     { icon: 'edit', label: 'Rename…', action: async () => { const n = await promptModal('Rename playlist', 'Name', p.name); if (n) { await api.patchPl(pid, { name: n }); refresh(true); } } },
+    p.hidden ? { icon: 'eye', label: 'Show on Home', action: async () => { await api.patchPl(pid, { hidden: false }); toast('Showing on Home again', { sub: p.name }); refresh(true); } }
+             : { icon: 'eyeOff', label: 'Hide from Home', action: async () => { await api.patchPl(pid, { hidden: true }); toast('Playlist hidden from Home', { sub: `${p.name} is still in the sidebar` }); refresh(true); } },
     '-',
     { icon: 'trash', label: 'Delete playlist', danger: true, action: async () => {
       if (!await confirmModal('Delete playlist?', `“${p.name}” will be removed. The songs stay in your library.`, 'Delete')) return;

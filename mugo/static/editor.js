@@ -7,7 +7,7 @@
    ===================================================================== */
 const Studio = (() => {
   const EPS = 1e-3;
-  const COLORS = { cut: '251,113,133', slow: '96,165,250', fast: '251,191,36' };
+  const COLORS = { cut: '251,113,133', slow: '96,165,250', fast: '251,191,36', d8: '192,132,252' };
   let st = null;          // editor state for the mounted song
   let root = null;        // view element
   const pa = new Audio(); // preview audio
@@ -30,8 +30,24 @@ const Studio = (() => {
         this.delay = c.createDelay(1); this.hp = c.createBiquadFilter(); this.hp.type = 'highpass'; this.hp.frequency.value = 180;
         this.conv = c.createConvolver(); this.conv.normalize = false; this.wet = c.createGain(); this.wet.gain.value = 0;
         src.connect(this.low).connect(this.mid).connect(this.high);
-        this.high.connect(this.dry).connect(c.destination);
-        this.high.connect(this.delay).connect(this.hp).connect(this.conv).connect(this.wet).connect(c.destination);
+        // 8D stage (same recipe as the server): mono → front/behind/head-shadow paths → per-ear gains
+        this.post = c.createGain();
+        this.orig = c.createGain(); this.high.connect(this.orig).connect(this.post);
+        const mono = c.createGain(); mono.channelCount = 1; mono.channelCountMode = 'explicit'; mono.channelInterpretation = 'speakers';
+        const lp = f => { const b = c.createBiquadFilter(); b.type = 'lowpass'; b.frequency.value = f; return b; };
+        const back = lp(3200), back2 = lp(3200), shadow = lp(1300);
+        this.high.connect(mono); mono.connect(back).connect(back2); mono.connect(shadow);
+        const merger = c.createChannelMerger(2);
+        this.ear = [0, 1].map(ch => {
+          const g = { front: c.createGain(), back: c.createGain(), shadow: c.createGain() };
+          mono.connect(g.front); back2.connect(g.back); shadow.connect(g.shadow);
+          Object.values(g).forEach(n => { n.gain.value = 0; n.connect(merger, 0, ch); });
+          return g;
+        });
+        this.e8 = c.createGain(); this.e8.gain.value = 0; merger.connect(this.e8).connect(this.post);
+        this.post.connect(this.dry).connect(c.destination);
+        this.post.connect(this.delay).connect(this.hp).connect(this.conv).connect(this.wet).connect(c.destination);
+        this.en = 0;
         this.update();
       } catch (e) { console.warn('live preview effects unavailable', e); this.ctx = null; }
     },
@@ -71,7 +87,37 @@ const Studio = (() => {
       } else this.wet.gain.setTargetAtTime(0, t, .05);
     },
     cal: 4.6,  // measured: browser wet level at gain 1 vs dry (server uses 6.3)
+    /** per-frame 8D motion; `t` is the position in the ORIGINAL song */
+    frame(t) {
+      if (!this.ctx || !st || !this.ear) return;
+      const now = this.ctx.currentTime, set = (p, v) => p.setTargetAtTime(v, now, .015);
+      const seg = segAt(t);
+      const target = st.eightD === 'all' ? 1 : st.eightD === 'parts' && seg && seg.d8 ? 1 : 0;
+      this.en += (target - this.en) * .06;                    // smooth ~0.5 s crossfade, like the render
+      const en = this.en < .002 ? 0 : this.en;
+      const th = 2 * Math.PI * outTime(t) / st.eightDPeriod;
+      const x = .88 * Math.sin(th), fb = (1 + Math.cos(th)) / 2;
+      const gains = [Math.cos((x + 1) * Math.PI / 4), Math.sin((x + 1) * Math.PI / 4)];
+      const shad = [.75 * Math.max(0, x), .75 * Math.max(0, -x)];
+      this.ear.forEach((g, i) => {
+        const k = 1.18 * gains[i];
+        set(g.front.gain, k * (1 - shad[i]) * fb);
+        set(g.back.gain, k * (1 - shad[i]) * (1 - fb));
+        set(g.shadow.gain, k * shad[i]);
+      });
+      set(this.e8.gain, .85 * en);
+      set(this.orig.gain, 1 - .85 * en);
+    },
   };
+  /** map an original-song time to the time in the edited output (cuts removed, speed applied) */
+  function outTime(t) {
+    let o = 0;
+    for (const s of st.segs) {
+      if (s.start >= t) break;
+      if (!s.cut) o += (Math.min(t, s.end) - s.start) / s.speed;
+    }
+    return o;
+  }
   let raf = 0;
 
   /* ---------------- mount / unmount ---------------- */
@@ -85,7 +131,7 @@ const Studio = (() => {
     stop();
     st = {
       id, song, dur: song.duration || 0, peaks: null, segs: [], sel: null, hist: [], fut: [],
-      zoom: 1, pitch: store.get('studioPitch', 'vinyl'), semitones: 0, warm: false, reverb: '', reverbAmount: .7, fadeIn: 0, fadeOut: 0, playhead: 0, titleTouched: false, hover: null,
+      zoom: 1, eightD: 'off', eightDPeriod: 8, pitch: store.get('studioPitch', 'vinyl'), semitones: 0, warm: false, reverb: '', reverbAmount: .7, fadeIn: 0, fadeOut: 0, playhead: 0, titleTouched: false, hover: null,
     };
     renderShell();
     load();
@@ -136,6 +182,7 @@ const Studio = (() => {
           <span><i style="background:rgba(${COLORS.cut},.8)"></i>Cut out</span>
           <span><i style="background:rgba(${COLORS.slow},.8)"></i>Slowed down</span>
           <span><i style="background:rgba(${COLORS.fast},.8)"></i>Sped up</span>
+          <span><i style="background:rgba(${COLORS.d8},.9)"></i>8D audio</span>
           <span style="margin-left:auto">Drag on the waveform to select · click to move the playhead</span>
         </div>
 
@@ -150,6 +197,7 @@ const Studio = (() => {
             <button class="btn cut" data-s="cut" title="Delete / Backspace">${icon('scissors')}<span>Cut out</span></button>
             <button class="btn keep" data-s="keep" title="K">${icon('crop')}<span>Keep only this</span></button>
             <button class="btn" data-s="playSel">${icon('play')}<span>Play selection</span></button>
+            <button class="btn d8" data-s="d8" title="Make this part spin around your head (headphones)">${icon('headphones')}<span>8D this part</span></button>
             <button class="btn ghost" data-s="resetSel">${icon('refresh')}<span>Reset part</span></button>
           </div>
           <span class="sep"></span>
@@ -173,6 +221,10 @@ const Studio = (() => {
             <div style="display:flex;align-items:center;gap:10px"><input type="range" min="-12" max="6" step="0.5" value="0" data-s="semis" style="width:130px;accent-color:#f472b6"><b data-s="semisVal" style="width:92px;text-align:right;font-variant-numeric:tabular-nums">0 semitones</b></div></div>
           <div class="opt-row"><div><b>Warm, heavy tone</b><small>Boosts the bass and softens the highs for a darker sound</small></div>
             <div class="seg-toggle" data-s="warm"><button data-v="0" class="on">Off</button><button data-v="1">On</button></div></div>
+          <div class="opt-row"><div><b>8D audio 🎧</b><small>The music circles around your head. Use headphones. Mark parts with “8D this part” or use it on the whole song</small></div>
+            <div class="seg-toggle" data-s="eightD"><button data-v="off" class="on">Off</button><button data-v="all">Whole song</button><button data-v="parts">Marked parts</button></div></div>
+          <div class="opt-row" data-s="periodRow" style="opacity:.4;pointer-events:none"><div><b>8D rotation</b><small>Seconds for one full circle around your head</small></div>
+            <div style="display:flex;align-items:center;gap:10px"><span class="sel-label">fast</span><input type="range" min="3" max="20" step="0.5" value="8" data-s="period" style="width:110px;accent-color:#c084fc"><span class="sel-label">slow</span><b data-s="periodVal" style="width:40px;text-align:right;font-variant-numeric:tabular-nums">8 s</b></div></div>
           <div class="opt-row"><div><b>Reverb</b><small>Convolution reverb, the “slowed + reverb” sound. You hear it in the preview too</small></div>
             <div class="seg-toggle" data-s="reverb"><button data-v="" class="on">Off</button><button data-v="room">Room</button><button data-v="hall">Hall</button><button data-v="dreamy">Dreamy</button></div></div>
           <div class="opt-row" data-s="amountRow" style="opacity:.4;pointer-events:none"><div><b>Reverb amount</b><small>How loud the echo is compared to the song</small></div>
@@ -244,7 +296,7 @@ const Studio = (() => {
     const out = [];
     for (const s of st.segs) {
       const p = out[out.length - 1];
-      if (p && p.cut === s.cut && Math.abs(p.speed - s.speed) < 1e-6) p.end = s.end;
+      if (p && p.cut === s.cut && !!p.d8 === !!s.d8 && Math.abs(p.speed - s.speed) < 1e-6) p.end = s.end;
       else out.push({ ...s });
     }
     st.segs = out.filter(s => s.end - s.start > 0.005);
@@ -255,7 +307,14 @@ const Studio = (() => {
     const sel = st.sel && st.sel.b - st.sel.a > 0.01 ? st.sel : null;
     if (name === 'cut' && sel) { apply(sel.a, sel.b, s => s.cut = true); toast('Cut out ' + fmt(sel.b - sel.a)); }
     else if (name === 'keep' && sel) { apply(0, sel.a, s => s.cut = true); apply(sel.b, st.dur, s => s.cut = true); toast('Trimmed to selection'); }
-    else if (name === 'reset' && sel) apply(sel.a, sel.b, s => { s.cut = false; s.speed = 1; });
+    else if (name === 'reset' && sel) apply(sel.a, sel.b, s => { s.cut = false; s.speed = 1; s.d8 = false; });
+    else if (name === 'd8' && sel) {
+      const inSel = st.segs.filter(s => s.end > sel.a + EPS && s.start < sel.b - EPS);
+      const turnOn = !inSel.every(s => s.d8);
+      apply(sel.a, sel.b, s => s.d8 = turnOn);
+      if (turnOn && st.eightD !== 'all') setEightD('parts');
+      toast(turnOn ? '8D on for this part 🎧' : '8D removed from this part');
+    }
     else if (name === 'speed') {
       const v = +q('speed').value;
       const [a, b] = sel ? [sel.a, sel.b] : [0, st.dur];
@@ -278,7 +337,7 @@ const Studio = (() => {
     draw(); ruler();
     const sel = st.sel;
     const has = !!(sel && sel.b - sel.a > 0.01);
-    ['cut', 'keep', 'playSel', 'resetSel'].forEach(k => q(k).disabled = !has);
+    ['cut', 'keep', 'playSel', 'resetSel', 'd8'].forEach(k => q(k).disabled = !has);
     if (document.activeElement !== q('selA')) q('selA').value = has ? fmtMs(sel.a) : '';
     if (document.activeElement !== q('selB')) q('selB').value = has ? fmtMs(sel.b) : '';
     q('selLen').textContent = has ? `(${fmtMs(sel.b - sel.a)})` : 'none — speed applies to whole song';
@@ -288,10 +347,10 @@ const Studio = (() => {
     const L = outLen();
     q('len').innerHTML = `${fmt(L)}<span style="font-size:14px;color:var(--muted);font-weight:600"> / ${fmt(st.dur)}</span>`;
     // edit list
-    const edits = st.segs.filter(s => s.cut || s.speed !== 1);
+    const edits = st.segs.filter(s => s.cut || s.speed !== 1 || s.d8);
     q('segList').innerHTML = edits.length ? edits.map(s => {
-      const c = s.cut ? COLORS.cut : s.speed < 1 ? COLORS.slow : COLORS.fast;
-      const lbl = s.cut ? 'Cut out' : (s.speed < 1 ? 'Slowed' : 'Sped up') + ` · ${s.speed.toFixed(2)}×`;
+      const c = s.cut ? COLORS.cut : s.speed < 1 ? COLORS.slow : s.speed > 1 ? COLORS.fast : COLORS.d8;
+      const lbl = s.cut ? 'Cut out' : [s.speed !== 1 ? (s.speed < 1 ? 'Slowed' : 'Sped up') + ` · ${s.speed.toFixed(2)}×` : '', s.d8 ? '8D audio' : ''].filter(Boolean).join(' + ');
       return `<div class="seg-row" data-seg="${s.start}|${s.end}"><span class="dot" style="background:rgb(${c})"></span><span class="lbl">${lbl}</span>
         <span style="color:var(--muted)">${fmtMs(s.start)} → ${fmtMs(s.end)}</span><button class="icon-btn" data-undo-seg="${s.start}|${s.end}" title="Reset this part">${icon('close')}</button></div>`;
     }).join('') : `<div style="color:var(--faint);padding:8px 2px;line-height:1.6">No edits yet. Select a part of the waveform, then cut it out, keep only it, or change its speed.</div>`;
@@ -334,6 +393,14 @@ const Studio = (() => {
       }
       x.fillStyle = `rgba(${c},.9)`; x.fillRect(X(s.start), 0, X(s.end) - X(s.start), 3);
       if (!s.cut) { x.font = '700 11px system-ui'; x.fillText(`${s.speed.toFixed(2)}×`, X(s.start) + 6, 17); }
+    }
+    // 8D parts: purple band along the bottom with a label
+    for (const s of st.segs) {
+      if (s.cut || !(s.d8 || st.eightD === 'all')) continue;
+      const a = X(s.start), wd = X(s.end) - a;
+      x.fillStyle = `rgba(${COLORS.d8},${st.eightD === 'all' || st.eightD === 'parts' ? .12 : .05})`; x.fillRect(a, 0, wd, h);
+      x.fillStyle = `rgba(${COLORS.d8},.95)`; x.fillRect(a, h - 4, wd, 4);
+      if (wd > 30 && (s.d8 || s === st.segs.find(z => !z.cut))) { x.font = '800 11px system-ui'; x.fillText('8D', a + 6, h - 10); }
     }
     // waveform
     const bw = 3, gap = 1, n = Math.floor(w / (bw + gap)), P = st.peaks, mid = h / 2;
@@ -388,11 +455,11 @@ const Studio = (() => {
     if (!st?.peaks) return;
     if (!hq.paused) return hqStop();
     stop(); if (!audio.paused) Player.pause();
-    const segs = kept().map(s => ({ start: +s.start.toFixed(3), end: +s.end.toFixed(3), speed: s.speed }));
+    const segs = kept().map(s => ({ start: +s.start.toFixed(3), end: +s.end.toFixed(3), speed: s.speed, d8: !!s.d8 }));
     if (!segs.length) return toast('Everything is cut — nothing to play', { error: true });
     const b = q('hifi'); b.disabled = true; b.innerHTML = `<span class="mini-bar indet" style="width:60px"><div></div></span><span>Rendering…</span>`;
     try {
-      const r = await api.preview({ source: st.id, segments: segs, pitch: st.pitch, semitones: st.semitones, warm: st.warm, reverb: st.reverb, reverbAmount: st.reverbAmount, fadeIn: st.fadeIn, fadeOut: st.fadeOut });
+      const r = await api.preview({ source: st.id, segments: segs, pitch: st.pitch, semitones: st.semitones, warm: st.warm, reverb: st.reverb, reverbAmount: st.reverbAmount, eightD: st.eightD, eightDPeriod: st.eightDPeriod, fadeIn: st.fadeIn, fadeOut: st.fadeOut });
       if (!q('hifi')) return;
       hq.src = r.url; await hq.play();
       b.disabled = false; b.innerHTML = `${icon('stop')}<span>Stop Hi-Fi</span>`;
@@ -433,6 +500,7 @@ const Studio = (() => {
     }
     const sp = segAt(t).speed; if (Math.abs(pa.playbackRate - sp) > 1e-3) pa.playbackRate = sp;
     st.playhead = t;
+    fx.frame(t);
     draw();
     // keep playhead in view when zoomed
     const wrap = q('wrap'); const X = t / st.dur * q('inner').clientWidth;
@@ -440,6 +508,14 @@ const Studio = (() => {
     raf = requestAnimationFrame(loop);
   }
   pa.addEventListener('ended', () => { stop(); if (st) { st.playhead = 0; draw(); } });
+
+  function setEightD(v) {
+    st.eightD = v;
+    q('eightD').querySelectorAll('button').forEach(x => x.classList.toggle('on', x.dataset.v === v));
+    const row = q('periodRow'); row.style.opacity = v !== 'off' ? 1 : .4; row.style.pointerEvents = v !== 'off' ? '' : 'none';
+    if (v === 'parts' && !st.segs.some(s => s.d8)) toast('Select a part of the waveform, then press “8D this part”');
+    draw();
+  }
 
   /* ---------------- events ---------------- */
   function bind() {
@@ -490,7 +566,7 @@ const Studio = (() => {
       const b = e.target.closest('button[data-s]');
       const k = b?.dataset.s;
       const seg = e.target.closest('[data-undo-seg]');
-      if (seg) { const [a, bb] = seg.dataset.undoSeg.split('|').map(Number); const before = snap(); apply(a, bb, s => { s.cut = false; s.speed = 1; }); commit(before); return; }
+      if (seg) { const [a, bb] = seg.dataset.undoSeg.split('|').map(Number); const before = snap(); apply(a, bb, s => { s.cut = false; s.speed = 1; s.d8 = false; }); commit(before); return; }
       const row = e.target.closest('[data-seg]');
       if (row) { const [a, bb] = row.dataset.seg.split('|').map(Number); st.sel = { a, b: bb }; st.playhead = a; update(); return; }
       if (!k) return;
@@ -503,6 +579,7 @@ const Studio = (() => {
       if (k === 'cut') return op('cut');
       if (k === 'keep') return op('keep');
       if (k === 'resetSel') return op('reset');
+      if (k === 'd8') return op('d8');
       if (k === 'applySpeed') return op('speed');
       if (k === 'playSel' && st.sel) return startPreview(st.sel.a, st.sel.b);
       if (k === 'resetAll') return confirmModal('Start over?', 'All cuts and speed changes will be removed.', 'Start over').then(ok => ok && op('resetAll'));
@@ -539,6 +616,8 @@ const Studio = (() => {
       const row = q('amountRow'); row.style.opacity = st.reverb ? 1 : .4; row.style.pointerEvents = st.reverb ? '' : 'none';
       fx.update();
     });
+    q('eightD').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setEightD(b.dataset.v); });
+    q('period').addEventListener('input', e => { st.eightDPeriod = +e.target.value; q('periodVal').textContent = st.eightDPeriod + ' s'; });
     q('revAmt').addEventListener('input', e => {
       st.reverbAmount = +e.target.value / 100; q('revAmtVal').textContent = e.target.value + '%'; fx.update();
     });
@@ -558,11 +637,11 @@ const Studio = (() => {
   }
 
   async function save() {
-    const segs = kept().map(s => ({ start: +s.start.toFixed(3), end: +s.end.toFixed(3), speed: s.speed }));
+    const segs = kept().map(s => ({ start: +s.start.toFixed(3), end: +s.end.toFixed(3), speed: s.speed, d8: !!s.d8 }));
     if (!segs.length) return toast('Everything is cut — nothing to save', { error: true });
     const btn = q('save'); btn.disabled = true;
     try {
-      const song = await api.edit({ source: st.id, segments: segs, pitch: st.pitch, semitones: st.semitones, warm: st.warm, reverb: st.reverb, reverbAmount: st.reverbAmount, fadeIn: st.fadeIn, fadeOut: st.fadeOut, title: q('title').value.trim() });
+      const song = await api.edit({ source: st.id, segments: segs, pitch: st.pitch, semitones: st.semitones, warm: st.warm, reverb: st.reverb, reverbAmount: st.reverbAmount, eightD: st.eightD, eightDPeriod: st.eightDPeriod, fadeIn: st.fadeIn, fadeOut: st.fadeOut, title: q('title').value.trim() });
       toast('Rendering your edit…', { img: thumb(st.song), sub: song.title });
       refresh(true);
     } catch (e) { toast(e.message, { error: true }); }

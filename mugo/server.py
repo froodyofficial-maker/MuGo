@@ -413,6 +413,7 @@ def build_filter(segments: list[dict], opts: dict) -> tuple[str, float]:
     lines = [f"[0:a]aresample=44100{rs},aformat=sample_fmts=fltp:channel_layouts=stereo,asplit={n}"
              + "".join(f"[in{i}]" for i in range(n))]
     total = 0.0
+    d8_parts: list[tuple[float, float]] = []  # output-time spans marked for 8D
     for i, seg in enumerate(segments):
         a, b, sp = float(seg["start"]), float(seg["end"]), float(seg.get("speed", 1))
         sp = min(max(sp, 0.25), 3.0)
@@ -423,6 +424,11 @@ def build_filter(segments: list[dict], opts: dict) -> tuple[str, float]:
             else:
                 chain += stretch_chain(sp)
         out_len = (b - a) / sp
+        if seg.get("d8"):
+            if d8_parts and abs(d8_parts[-1][1] - total) < 1e-3:
+                d8_parts[-1] = (d8_parts[-1][0], total + out_len)
+            else:
+                d8_parts.append((total, total + out_len))
         total += out_len
         f = min(0.012, out_len / 4)  # tiny fades so cut points never click
         chain += [f"afade=t=in:d={f:.4f}:curve=qsin", f"afade=t=out:st={max(out_len - f, 0):.4f}:d={f:.4f}:curve=qsin"]
@@ -444,6 +450,11 @@ def build_filter(segments: list[dict], opts: dict) -> tuple[str, float]:
     if tone:
         lines.append("[cat]" + ",".join(tone) + "[tone]")
         last = "tone"
+    mode8d = opts.get("eightD") or "off"
+    if mode8d == "all" or (mode8d == "parts" and d8_parts):
+        lines += eight_d_lines(last, "e8d", float(opts.get("eightDPeriod", 8) or 8),
+                               None if mode8d == "all" else d8_parts)
+        last = "e8d"
     rev = REVERBS.get(opts.get("reverb") or "")
     if rev:  # convolution reverb with a generated, decorrelated stereo impulse response
         tail, predelay, lp = rev
@@ -467,6 +478,59 @@ def build_filter(segments: list[dict], opts: dict) -> tuple[str, float]:
     post.append("alimiter=limit=0.97:attack=3:release=60:level=false")  # never clip
     lines.append(f"[{last}]" + ",".join(post) + "[out]")
     return ";".join(lines), total
+
+
+def eight_d_lines(inp: str, out: str, period: float, parts) -> list[str]:
+    """8D audio: the song circles around the listener's head (for headphones).
+
+    Built from cues the brain uses to place a sound:
+      * equal-power left/right panning that follows a circle,
+      * a duller (low-passed) sound when the source is behind the head,
+      * head shadow: the ear facing away hears a softened version,
+      * a little of the original stereo mix kept for body.
+    `parts` = output-time spans to apply it to (None = whole song), with
+    0.6 s crossfades in and out of each span."""
+    period = max(2.0, min(30.0, period))
+    th = f"2*PI*t/{period:.3f}"
+    if parts:
+        gate = "min(1," + "+".join(
+            f"clip((t-{a:.3f})/0.6,0,1)*clip(({b:.3f}-t)/0.6,0,1)" for a, b in parts) + ")"
+    else:
+        gate = "1"
+    # Every gain depends only on time, so each path is a time-varying `volume` evaluated per
+    # 256-sample block (≈6 ms, far finer than the ear can hear for a slow rotation) — fast.
+    x = f"(0.88*sin({th}))"           # -1 = hard left … +1 = hard right
+    fb = f"((1+cos({th}))/2)"         # 1 = in front of you, 0 = behind
+    k = f"(0.85*1.18*{gate})"
+    gains = {}
+    for ear, pan, shadow in (("L", f"cos(({x}+1)*PI/4)", f"(0.75*max(0,{x}))"),
+                             ("R", f"sin(({x}+1)*PI/4)", f"(0.75*max(0,-{x}))")):
+        gains[ear] = {
+            "front": f"{k}*{pan}*(1-{shadow})*{fb}",
+            "back": f"{k}*{pan}*(1-{shadow})*(1-{fb})",
+            "shadow": f"{k}*{pan}*{shadow}",
+            "orig": f"1-0.85*{gate}",
+        }
+    vol = lambda e: f"volume='{e}':eval=frame"
+    lines = [
+        f"[{inp}]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,asetnsamples=n=256,asplit=2[e8o][e8s]",
+        "[e8o]channelsplit=channel_layout=stereo[e8oL][e8oR]",
+        "[e8s]pan=mono|c0=0.5*c0+0.5*c1,asplit=3[e8m][e8b][e8h]",
+        "[e8b]lowpass=f=3200,lowpass=f=3200[e8bl]",            # behind the head: duller
+        "[e8h]lowpass=f=1300[e8hl]",                           # head shadow on the far ear
+        "[e8m]asplit=2[e8mL][e8mR]", "[e8bl]asplit=2[e8bL][e8bR]", "[e8hl]asplit=2[e8hL][e8hR]",
+    ]
+    for ear in ("L", "R"):
+        g = gains[ear]
+        lines += [
+            f"[e8m{ear}]{vol(g['front'])}[e8f{ear}2]",
+            f"[e8b{ear}]{vol(g['back'])}[e8b{ear}2]",
+            f"[e8h{ear}]{vol(g['shadow'])}[e8h{ear}2]",
+            f"[e8o{ear}]{vol(g['orig'])}[e8o{ear}2]",
+            f"[e8f{ear}2][e8b{ear}2][e8h{ear}2][e8o{ear}2]amix=inputs=4:normalize=0:duration=first[e8{ear}]",
+        ]
+    lines.append(f"[e8L][e8R]join=inputs=2:channel_layout=stereo,aformat=sample_fmts=fltp:channel_layouts=stereo[{out}]")
+    return lines
 
 
 def run_render(src_path: Path, segments, opts: dict, out: Path) -> float:
@@ -692,6 +756,8 @@ def update_playlist(pid):
         pl = lib.playlist(pid) or abort(404)
         if "name" in body:
             pl["name"] = body["name"].strip()[:80] or pl["name"]
+        if "hidden" in body:
+            pl["hidden"] = bool(body["hidden"])
         if "songs" in body:
             pl["songs"] = [s for s in body["songs"] if s in lib.songs]
         if "add" in body:
@@ -745,6 +811,8 @@ def edit_opts(body: dict) -> dict:
         "reverb": body.get("reverb") if body.get("reverb") in REVERBS else None,
         "semitones": float(body.get("semitones", 0) or 0),
         "reverbAmount": float(body.get("reverbAmount", 0.7) or 0),
+        "eightD": body.get("eightD") if body.get("eightD") in ("off", "all", "parts") else "off",
+        "eightDPeriod": float(body.get("eightDPeriod", 8) or 8),
         "warm": bool(body.get("warm")),
     }
 
