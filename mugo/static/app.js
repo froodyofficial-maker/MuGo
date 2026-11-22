@@ -67,7 +67,7 @@ async function refresh(force = false) {
     if (p && p.status !== 'ready' && s.status === 'ready') toast(s.source === 'edit' ? 'Edit rendered' : 'Ready to play offline', { img: thumb(s), sub: s.title });
     if (p && p.status !== 'error' && s.status === 'error') toast('Download failed', { error: true, sub: s.error || s.title });
   }
-  const sig = JSON.stringify([S.songs.map(s => [s.id, s.status, s.title, s.artist, s.liked, s.thumb, s.thumbVer]), S.playlists]);
+  const sig = JSON.stringify([S.songs.map(s => [s.id, s.status, s.title, s.artist, s.liked, s.thumb, s.thumbVer, s.hidden]), S.playlists]);
   if (force || sig !== S.sig) {
     S.sig = sig;
     renderSidebar();
@@ -174,8 +174,9 @@ function greeting() {
 }
 
 function viewHome() {
-  const songs = S.songs;
-  if (!songs.length) return `
+  const songs = S.songs.filter(s => !s.hidden);
+  const hiddenCount = S.songs.length - songs.length;
+  if (!S.songs.length) return `
     <div class="hero"><div><h1>${greeting()}, <span class="g">let's build your library.</span></h1>
     <p>Everything you add is downloaded to your laptop, so it keeps playing offline.</p></div></div>
     <div class="empty"><div class="bubble">${icon('link')}</div><h3>Paste a YouTube link</h3>
@@ -192,7 +193,7 @@ function viewHome() {
   const busy = songs.filter(s => !ready(s));
   const top = [...readySongs].filter(s => s.plays).sort((a, b) => b.plays - a.plays).slice(0, 12);
   return `
-    <div class="hero"><div><h1>${greeting()}<span class="g">.</span></h1><p>${readySongs.length ? 'Pick up where you left off.' : 'Your first songs are downloading…'}</p></div>
+    <div class="hero"><div><h1>${greeting()}<span class="g">.</span></h1><p>${readySongs.length ? 'Pick up where you left off.' : songs.length ? 'Your first songs are downloading…' : 'Everything is hidden from Home.'}${hiddenCount ? ` <a href="#/library" style="color:var(--faint)">· ${hiddenCount} hidden from Home</a>` : ''}</p></div>
       <div class="stats stagger">
         <div class="stat" style="--i:1"><b>${readySongs.length}</b><span>songs offline</span></div>
         <div class="stat" style="--i:2"><b>${S.playlists.length}</b><span>playlists</span></div>
@@ -254,7 +255,7 @@ function songRow(s, i, opts = {}) {
     <div class="num"><span class="n">${i + 1}</span><span class="eq"><span></span><span></span><span></span><span></span></span>
       ${r ? `<button class="hover-play" data-act="play">${icon('play')}</button>` : ''}</div>
     <div class="s-main"><div class="s-art">${artHTML(s)}</div><div class="s-text">
-      <div class="s-title">${esc(s.title)}${s.source === 'edit' ? '<span class="tag edit">EDIT</span>' : ''}</div><div class="s-sub">${sub}</div></div></div>
+      <div class="s-title">${esc(s.title)}${s.source === 'edit' ? '<span class="tag edit">EDIT</span>' : ''}${s.hidden ? `<span class="tag" title="Hidden from Home">${icon('eyeOff')}</span>` : ''}</div><div class="s-sub">${sub}</div></div></div>
     <div class="s-col">${s.plays ? s.plays + ' play' + (s.plays === 1 ? '' : 's') : '—'}</div>
     <div class="s-col s-added">${ago(s.added)}</div>
     <div class="s-time">${s.duration ? fmt(s.duration) : '—'}</div>
@@ -461,7 +462,7 @@ view.addEventListener('drop', async e => {
 const menuEl = $('#menu');
 function showMenu(x, y, items) {
   menuEl.innerHTML = items.map((it, i) => it === '-' ? '<hr>' : `<button data-i="${i}" class="${it.danger ? 'danger' : ''}">${icon(it.icon)}<span>${esc(it.label)}</span>${it.sub ? icon('chevronRight', 'chev') : ''}</button>`).join('');
-  menuEl.hidden = false;
+  menuEl.hidden = false; menuEl.openedAt = performance.now();
   menuEl.style.left = '0px'; menuEl.style.top = '0px';
   const r = menuEl.getBoundingClientRect();
   menuEl.style.left = Math.min(x, innerWidth - r.width - 10) + 'px';
@@ -476,7 +477,7 @@ function showMenu(x, y, items) {
 function hideMenu() { menuEl.hidden = true; }
 document.addEventListener('mousedown', e => { if (!menuEl.hidden && !menuEl.contains(e.target)) hideMenu(); });
 window.addEventListener('blur', hideMenu);
-$('#main').addEventListener('scroll', hideMenu, { passive: true });
+$('#main').addEventListener('scroll', () => { if (performance.now() - (menuEl.openedAt || 0) > 400) hideMenu(); }, { passive: true });  // ignore leftover smooth-scroll right after opening
 
 function songMenu(id, x, y) {
   const s = S.byId[id]; if (!s) return;
@@ -496,6 +497,8 @@ function songMenu(id, x, y) {
   );
   items.push({ icon: 'edit', label: 'Rename…', action: () => renameSong(id) });
   items.push({ icon: 'image', label: 'Change cover image…', action: () => pickCover(id) });
+  items.push(s.hidden ? { icon: 'eye', label: 'Show on Home', action: () => setHidden(id, false) }
+                      : { icon: 'eyeOff', label: 'Hide from Home', action: () => setHidden(id, true) });
   if (s.customThumb) items.push({ icon: 'refresh', label: 'Restore original cover', action: () => resetCover(id) });
   if (r) items.push({ icon: 'download', label: 'Save file to…', action: () => { const a = document.createElement('a'); a.href = `/media/audio/${id}?download=1`; a.click(); } });
   if (s.status === 'error' && s.source === 'youtube') items.push({ icon: 'refresh', label: 'Retry download', action: async () => { await api.retry(id); refresh(true); } });
@@ -516,6 +519,12 @@ function playlistMenu(pid, x, y) {
       await api.delPl(pid); if (S.route.arg === pid) location.hash = '#/'; toast('Playlist deleted'); refresh(true);
     } },
   ]);
+}
+async function setHidden(id, hidden) {
+  const s = S.byId[id]; if (!s) return;
+  await api.patchSong(id, { hidden });
+  toast(hidden ? 'Hidden from Home' : 'Showing on Home again', { img: thumb(s), sub: hidden ? `${s.title} is still in your Library` : s.title });
+  refresh(true);
 }
 async function renameSong(id) {
   const s = S.byId[id];
@@ -845,42 +854,85 @@ function drawViz() {
 }
 
 /* ---------------- aggressive shakes ---------------- */
-const shake = { on: store.get('shakes', false), hist: [], last: 0, amp: 0, dx: 0, dy: 0, rot: 0 };
-/** Kick-drum energy (≈40–130 Hz) from the fine-grained analyser, in dB-ish linear units. */
-function kickEnergy() {
+const shake = {
+  on: store.get('shakes', false), kickHist: [], fluxHist: [], prevMag: null, lastKick: 0, lastHit: 0, lastT: 0,
+  loud: 0, x: 0, y: 0, r: 0, z: 0, vx: 0, vy: 0, vr: 0, vz: 0,
+};
+/** Spectrum in linear magnitudes from the fine-grained analyser. */
+function beatSpectrum() {
   beatAn.getFloatFrequencyData(beatBins);
-  const hz = actx.sampleRate / beatAn.fftSize;
-  const lo = Math.max(1, Math.floor(40 / hz)), hi = Math.ceil(130 / hz);
-  let e = 0; for (let i = lo; i <= hi; i++) e += Math.pow(10, beatBins[i] / 20);
-  return e / (hi - lo + 1);
+  return { hz: actx.sampleRate / beatAn.fftSize, mag: i => Math.pow(10, beatBins[i] / 20) };
+}
+/** onset test: value jumps well above its recent history */
+function onset(hist, v, len, k, floor) {
+  hist.push(v); if (hist.length > len) hist.shift();
+  if (hist.length < len / 2) return 0;
+  const avg = hist.reduce((a, b) => a + b, 0) / hist.length;
+  const sd = Math.sqrt(hist.reduce((a, b) => a + (b - avg) ** 2, 0) / hist.length);
+  const thr = avg + Math.max(sd * k, avg * .3);
+  return v > thr && v > floor ? Math.min(1, (v - thr) / (thr + 1e-6) + .35) : 0;
 }
 function shakeFrame() {
   const wrap = $('.np-art-wrap'), body = $('.np-body');
-  if (!shake.on || audio.paused || !beatAn) { wrap.style.transform = ''; body.style.transform = ''; shake.amp = 0; return; }
-  const now = performance.now(), e = kickEnergy();
-  // compare against the last ~0.7 s: a beat is a sharp jump above the recent average
-  const h = shake.hist; h.push(e); if (h.length > 42) h.shift();
-  const avg = h.reduce((a, b) => a + b, 0) / h.length;
-  const sd = Math.sqrt(h.reduce((a, b) => a + (b - avg) ** 2, 0) / h.length);
-  const isBeat = h.length > 20 && e > avg + Math.max(sd * 1.5, avg * .35) && e > 0.004 && now - shake.last > 220;
-  if (isBeat) {
-    shake.last = now;
-    const strength = Math.min(1, (e - avg) / (avg * 1.5 + 1e-6));   // how hard the kick hits
-    shake.amp = .45 + .55 * strength;
-    const ang = Math.random() * Math.PI * 2;                          // one punch direction per beat
-    shake.dx = Math.cos(ang); shake.dy = Math.sin(ang); shake.rot = Math.random() < .5 ? -1 : 1;
-  } else {
-    shake.amp *= .8;                                                  // settle quickly between beats
+  if (!shake.on || !beatAn || (audio.paused && Math.abs(shake.x) + Math.abs(shake.vx) < .05)) {
+    wrap.style.transform = ''; body.style.transform = '';
+    Object.assign(shake, { x: 0, y: 0, r: 0, z: 0, vx: 0, vy: 0, vr: 0, vz: 0 });
+    return;
   }
-  const a = shake.amp < .02 ? 0 : shake.amp;
-  wrap.style.transform = a ? `translate(${shake.dx * a * 12}px, ${shake.dy * a * 9}px) rotate(${shake.rot * a * 1.8}deg) scale(${1 + a * .045})` : '';
-  body.style.transform = a > .7 ? `translate(${shake.dx * a * 2.5}px, ${shake.dy * a * 2}px)` : '';
+  const now = performance.now(), dt = Math.min(.05, (now - (shake.lastT || now)) / 1000) || 1 / 60;
+  shake.lastT = now;
+  const { hz, mag } = beatSpectrum();
+  const playing = !audio.paused;
+
+  if (playing) {
+    // 1) kick drum: energy jump in ~40–130 Hz → big punch
+    const lo = Math.max(1, Math.floor(40 / hz)), hi = Math.ceil(130 / hz);
+    let kick = 0; for (let i = lo; i <= hi; i++) kick += mag(i); kick /= hi - lo + 1;
+    const k = now - shake.lastKick > 200 ? onset(shake.kickHist, kick, 42, 1.4, .004) : (onset(shake.kickHist, kick, 42, 99, 9), 0);
+    // 2) snares / claps / hats: spectral flux in ~1.5–9 kHz → smaller hits
+    const a = Math.floor(1500 / hz), b = Math.ceil(9000 / hz);
+    let flux = 0, loud = 0;
+    const mags = new Float32Array(b - a + 1);
+    for (let i = a; i <= b; i++) { const m = mag(i); mags[i - a] = m; if (shake.prevMag) flux += Math.max(0, m - shake.prevMag[i - a]); loud += m; }
+    shake.prevMag = mags;
+    const nflux = flux / (loud + 1e-9);   // flux relative to how loud the band is: ignores tiny wobbles in steady sounds
+    const bandOn = loud / (b - a + 1) > 1e-5;  // the snare/hat band must actually contain sound (≈ -100 dB per bin)
+    const hit = bandOn && now - shake.lastHit > 110 ? onset(shake.fluxHist, nflux, 30, 1.8, .12) : (onset(shake.fluxHist, nflux, 30, 99, 9), 0);
+    // 3) overall loudness → continuous sway
+    let all = 0; for (let i = 0; i < freq.length; i++) all += freq[i]; all /= freq.length * 255;
+    shake.loud += (all - shake.loud) * .08;
+
+    const kickImpulse = (power, size) => {
+      const ang = Math.random() * Math.PI * 2;
+      shake.vx += Math.cos(ang) * power * size * 520; shake.vy += Math.sin(ang) * power * size * 400;
+      shake.vr += (Math.random() < .5 ? -1 : 1) * power * size * 95; shake.vz += power * size * 1.6;
+    };
+    if (k) { shake.lastKick = now; kickImpulse(k, 1); }
+    if (hit && !k) { shake.lastHit = now; kickImpulse(hit, .35); }
+  }
+
+  // smooth sway that grows with loudness (layered sines = organic, never repeats exactly)
+  const t = now / 1000, L = playing ? Math.max(0, shake.loud - .08) * 1.6 : 0;
+  const tx = (Math.sin(t * 1.3) + .6 * Math.sin(t * 2.7 + 1.3)) * L * 7;
+  const ty = (Math.sin(t * 1.1 + 2) + .6 * Math.sin(t * 2.3 + .4)) * L * 5;
+  const tr = Math.sin(t * .9 + .7) * L * 1.4;
+
+  // damped springs toward the sway target: punches overshoot slightly and settle (~0.35 s)
+  const K = 210, C = 15, KZ = 260, CZ = 20;
+  shake.vx += (-K * (shake.x - tx) - C * shake.vx) * dt; shake.x += shake.vx * dt;
+  shake.vy += (-K * (shake.y - ty) - C * shake.vy) * dt; shake.y += shake.vy * dt;
+  shake.vr += (-K * (shake.r - tr) - C * shake.vr) * dt; shake.r += shake.vr * dt;
+  shake.vz += (-KZ * shake.z - CZ * shake.vz) * dt; shake.z += shake.vz * dt;
+  const cl = (v, m) => Math.max(-m, Math.min(m, v));
+  const x = cl(shake.x, 18), y = cl(shake.y, 14), r = cl(shake.r, 3), z = cl(shake.z, .07);
+  wrap.style.transform = `translate(${x.toFixed(2)}px, ${y.toFixed(2)}px) rotate(${r.toFixed(2)}deg) scale(${(1 + z).toFixed(4)})`;
+  body.style.transform = `translate(${(x * .12).toFixed(2)}px, ${(y * .12).toFixed(2)}px)`;
 }
 function setShakes(v) {
   shake.on = v; store.set('shakes', v);
   $('#shakeToggle').classList.toggle('on', v); $('#np').classList.toggle('shaking', v);
 }
-$('#shakeToggle').onclick = () => { setShakes(!shake.on); toast(shake.on ? 'Aggressive shakes ON 💥' : 'Aggressive shakes off', { sub: shake.on ? 'The artwork now hits on the beat' : '' }); };
+$('#shakeToggle').onclick = () => { setShakes(!shake.on); toast(shake.on ? 'Aggressive shakes ON 💥' : 'Aggressive shakes off', { sub: shake.on ? 'The artwork moves with the music' : '' }); };
 setShakes(shake.on);
 
 /* ---------------- custom cover images ---------------- */

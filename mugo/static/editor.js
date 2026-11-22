@@ -12,6 +12,66 @@ const Studio = (() => {
   let root = null;        // view element
   const pa = new Audio(); // preview audio
   pa.preload = 'auto';
+
+  /* Live effects for the quick preview, matching the server render:
+     warm EQ → dry + (pre-delay → low-cut → convolution reverb) */
+  const REVERBS = { room: [1.4, .018, 7500], hall: [3.2, .035, 6000], dreamy: [5.8, .055, 4500] };
+  const fx = {
+    ctx: null, irCache: {},
+    init() {
+      if (this.ctx) { if (this.ctx.state === 'suspended') this.ctx.resume(); return; }
+      try {
+        const c = this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const src = c.createMediaElementSource(pa);
+        this.low = c.createBiquadFilter(); this.low.type = 'lowshelf'; this.low.frequency.value = 95;
+        this.mid = c.createBiquadFilter(); this.mid.type = 'peaking'; this.mid.frequency.value = 250; this.mid.Q.value = 1;
+        this.high = c.createBiquadFilter(); this.high.type = 'highshelf'; this.high.frequency.value = 5500;
+        this.dry = c.createGain();
+        this.delay = c.createDelay(1); this.hp = c.createBiquadFilter(); this.hp.type = 'highpass'; this.hp.frequency.value = 180;
+        this.conv = c.createConvolver(); this.conv.normalize = false; this.wet = c.createGain(); this.wet.gain.value = 0;
+        src.connect(this.low).connect(this.mid).connect(this.high);
+        this.high.connect(this.dry).connect(c.destination);
+        this.high.connect(this.delay).connect(this.hp).connect(this.conv).connect(this.wet).connect(c.destination);
+        this.update();
+      } catch (e) { console.warn('live preview effects unavailable', e); this.ctx = null; }
+    },
+    /** Same recipe as the server: decorrelated pink-noise tails with an exponential decay, lowpassed. */
+    ir(name) {
+      if (this.irCache[name]) return this.irCache[name];
+      const [tail, , lp] = REVERBS[name], c = this.ctx, sr = c.sampleRate, n = Math.floor(tail * sr);
+      const buf = c.createBuffer(2, n, sr);
+      for (let ch = 0; ch < 2; ch++) {
+        const d = buf.getChannelData(ch);
+        let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0, y = 0, e = 0;
+        const a = Math.exp(-2 * Math.PI * lp / sr);  // one-pole lowpass
+        for (let i = 0; i < n; i++) {
+          const w = Math.random() * 2 - 1;  // Paul Kellet pink-noise filter
+          b0 = .99886 * b0 + w * .0555179; b1 = .99332 * b1 + w * .0750759; b2 = .969 * b2 + w * .153852;
+          b3 = .8665 * b3 + w * .3104856; b4 = .55 * b4 + w * .5329522; b5 = -.7616 * b5 - w * .016898;
+          const pink = b0 + b1 + b2 + b3 + b4 + b5 + b6 + w * .5362; b6 = w * .115926;
+          y = (1 - a) * pink + a * y;
+          const t = i / n, env = Math.pow(1 - t, 4) * Math.min(1, i / (sr * .012));  // ≈ exp decay + 12 ms attack
+          d[i] = y * env; e += d[i] * d[i];
+        }
+        const k = 1 / Math.sqrt(e || 1); for (let i = 0; i < n; i++) d[i] *= k;  // energy-normalise like the server
+      }
+      return (this.irCache[name] = buf);
+    },
+    update() {
+      if (!this.ctx || !st) return;
+      const warm = st.warm, t = this.ctx.currentTime;
+      this.low.gain.setTargetAtTime(warm ? 5 : 0, t, .05);
+      this.mid.gain.setTargetAtTime(warm ? 1.5 : 0, t, .05);
+      this.high.gain.setTargetAtTime(warm ? -4 : 0, t, .05);
+      if (st.reverb && REVERBS[st.reverb]) {
+        if (this.conv.buffer !== this.ir(st.reverb)) this.conv.buffer = this.ir(st.reverb);
+        this.delay.delayTime.value = REVERBS[st.reverb][1];
+        const relDb = -16 + 17 * st.reverbAmount;               // same mapping as the server
+        this.wet.gain.setTargetAtTime(Math.pow(10, (relDb - fx.cal) / 20), t, .05);
+      } else this.wet.gain.setTargetAtTime(0, t, .05);
+    },
+    cal: 4.6,  // measured: browser wet level at gain 1 vs dry (server uses 6.3)
+  };
   let raf = 0;
 
   /* ---------------- mount / unmount ---------------- */
@@ -25,7 +85,7 @@ const Studio = (() => {
     stop();
     st = {
       id, song, dur: song.duration || 0, peaks: null, segs: [], sel: null, hist: [], fut: [],
-      zoom: 1, pitch: store.get('studioPitch', 'vinyl'), semitones: 0, warm: false, reverb: '', fadeIn: 0, fadeOut: 0, playhead: 0, titleTouched: false, hover: null,
+      zoom: 1, pitch: store.get('studioPitch', 'vinyl'), semitones: 0, warm: false, reverb: '', reverbAmount: .7, fadeIn: 0, fadeOut: 0, playhead: 0, titleTouched: false, hover: null,
     };
     renderShell();
     load();
@@ -111,10 +171,12 @@ const Studio = (() => {
             <div class="seg-toggle" data-s="pitch"><button data-v="vinyl">Deeper</button><button data-v="keep">Keep pitch</button></div></div>
           <div class="opt-row"><div><b>Extra depth</b><small>Shift the whole song's pitch down (or up) without changing speed. Hear it with Hi-Fi preview</small></div>
             <div style="display:flex;align-items:center;gap:10px"><input type="range" min="-12" max="6" step="0.5" value="0" data-s="semis" style="width:130px;accent-color:#f472b6"><b data-s="semisVal" style="width:92px;text-align:right;font-variant-numeric:tabular-nums">0 semitones</b></div></div>
-          <div class="opt-row"><div><b>Warm, heavy tone</b><small>Boosts the bass and softens the highs for a darker sound. Hear it with Hi-Fi preview</small></div>
+          <div class="opt-row"><div><b>Warm, heavy tone</b><small>Boosts the bass and softens the highs for a darker sound</small></div>
             <div class="seg-toggle" data-s="warm"><button data-v="0" class="on">Off</button><button data-v="1">On</button></div></div>
-          <div class="opt-row"><div><b>Reverb</b><small>Convolution reverb, added at render (hear it with Hi-Fi preview)</small></div>
+          <div class="opt-row"><div><b>Reverb</b><small>Convolution reverb, the “slowed + reverb” sound. You hear it in the preview too</small></div>
             <div class="seg-toggle" data-s="reverb"><button data-v="" class="on">Off</button><button data-v="room">Room</button><button data-v="hall">Hall</button><button data-v="dreamy">Dreamy</button></div></div>
+          <div class="opt-row" data-s="amountRow" style="opacity:.4;pointer-events:none"><div><b>Reverb amount</b><small>How loud the echo is compared to the song</small></div>
+            <div style="display:flex;align-items:center;gap:10px"><input type="range" min="0" max="100" step="5" value="70" data-s="revAmt" style="width:130px;accent-color:#f472b6"><b data-s="revAmtVal" style="width:44px;text-align:right;font-variant-numeric:tabular-nums">70%</b></div></div>
           <div class="opt-row"><div><b>Fade in / out</b><small>seconds</small></div><div style="display:flex;gap:8px">
             <input class="num-input" type="number" min="0" max="20" step="0.5" value="0" data-s="fadeIn" title="Fade in">
             <input class="num-input" type="number" min="0" max="20" step="0.5" value="0" data-s="fadeOut" title="Fade out"></div></div>
@@ -330,7 +392,7 @@ const Studio = (() => {
     if (!segs.length) return toast('Everything is cut — nothing to play', { error: true });
     const b = q('hifi'); b.disabled = true; b.innerHTML = `<span class="mini-bar indet" style="width:60px"><div></div></span><span>Rendering…</span>`;
     try {
-      const r = await api.preview({ source: st.id, segments: segs, pitch: st.pitch, semitones: st.semitones, warm: st.warm, reverb: st.reverb, fadeIn: st.fadeIn, fadeOut: st.fadeOut });
+      const r = await api.preview({ source: st.id, segments: segs, pitch: st.pitch, semitones: st.semitones, warm: st.warm, reverb: st.reverb, reverbAmount: st.reverbAmount, fadeIn: st.fadeIn, fadeOut: st.fadeOut });
       if (!q('hifi')) return;
       hq.src = r.url; await hq.play();
       b.disabled = false; b.innerHTML = `${icon('stop')}<span>Stop Hi-Fi</span>`;
@@ -352,6 +414,7 @@ const Studio = (() => {
     st.until = until;
     pa.preservesPitch = pa.mozPreservesPitch = pa.webkitPreservesPitch = st.pitch === 'keep';
     pa.currentTime = t; pa.playbackRate = segAt(t).speed;
+    fx.init();
     pa.play().catch(() => {});
     setPlayIcon(true);
     cancelAnimationFrame(raf); raf = requestAnimationFrame(loop);
@@ -468,10 +531,16 @@ const Studio = (() => {
     q('warm').addEventListener('click', e => {
       const b = e.target.closest('button'); if (!b) return;
       st.warm = b.dataset.v === '1'; q('warm').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+      fx.update();
     });
     q('reverb').addEventListener('click', e => {
       const b = e.target.closest('button'); if (!b) return;
       st.reverb = b.dataset.v; q('reverb').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+      const row = q('amountRow'); row.style.opacity = st.reverb ? 1 : .4; row.style.pointerEvents = st.reverb ? '' : 'none';
+      fx.update();
+    });
+    q('revAmt').addEventListener('input', e => {
+      st.reverbAmount = +e.target.value / 100; q('revAmtVal').textContent = e.target.value + '%'; fx.update();
     });
     q('fadeIn').addEventListener('input', e => st.fadeIn = Math.max(0, +e.target.value || 0));
     q('fadeOut').addEventListener('input', e => st.fadeOut = Math.max(0, +e.target.value || 0));
@@ -493,7 +562,7 @@ const Studio = (() => {
     if (!segs.length) return toast('Everything is cut — nothing to save', { error: true });
     const btn = q('save'); btn.disabled = true;
     try {
-      const song = await api.edit({ source: st.id, segments: segs, pitch: st.pitch, semitones: st.semitones, warm: st.warm, reverb: st.reverb, fadeIn: st.fadeIn, fadeOut: st.fadeOut, title: q('title').value.trim() });
+      const song = await api.edit({ source: st.id, segments: segs, pitch: st.pitch, semitones: st.semitones, warm: st.warm, reverb: st.reverb, reverbAmount: st.reverbAmount, fadeIn: st.fadeIn, fadeOut: st.fadeOut, title: q('title').value.trim() });
       toast('Rendering your edit…', { img: thumb(st.song), sub: song.title });
       refresh(true);
     } catch (e) { toast(e.message, { error: true }); }

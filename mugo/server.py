@@ -388,11 +388,21 @@ def resample_opts() -> str:
     return ":resampler=soxr:precision=28" if ff_has("soxr") else ""
 
 
-REVERBS = {  # name: (tail seconds, wet level, lowpass on the tail)
-    "room": (1.1, 0.06, 7000),
-    "hall": (2.6, 0.07, 5500),
-    "dreamy": (4.2, 0.14, 4200),
+REVERBS = {  # name: (tail seconds, pre-delay ms, lowpass on the tail)
+    "room": (1.4, 18, 7500),
+    "hall": (3.2, 35, 6000),
+    "dreamy": (5.8, 55, 4500),
 }
+# With an energy-normalised IR (after the low-cut) the wet signal comes out ~6.3 dB louder than
+# the dry signal (measured on music); subtract that so `amount` maps to a real ratio.
+REVERB_CAL_DB = 6.3
+
+
+def reverb_weight(amount: float) -> float:
+    """amount 0..1 → wet mix weight. 0.3 ≈ subtle (-11 dB), 0.7 ≈ lush (-4 dB), 1.0 ≈ as loud as the song."""
+    amount = max(0.0, min(1.0, amount))
+    rel_db = -16 + 17 * amount
+    return 10 ** ((rel_db - REVERB_CAL_DB) / 20)
 
 
 def build_filter(segments: list[dict], opts: dict) -> tuple[str, float]:
@@ -436,14 +446,17 @@ def build_filter(segments: list[dict], opts: dict) -> tuple[str, float]:
         last = "tone"
     rev = REVERBS.get(opts.get("reverb") or "")
     if rev:  # convolution reverb with a generated, decorrelated stereo impulse response
-        tail, wet, lp = rev
-        for ch, seed in (("l", 7), ("r", 13)):
+        tail, predelay, lp = rev
+        wet = reverb_weight(float(opts.get("reverbAmount", 0.7)))
+        for ch, seed in (("l", 7), ("r", 13)):  # decorrelated L/R tails = wide stereo space
             lines.append(f"anoisesrc=d={tail}:c=pink:r=44100:a=0.9:seed={seed},lowpass=f={lp},"
                          f"afade=t=in:d=0.012,afade=t=out:st=0:d={tail}:curve=exp[ir{ch}]")
         lines.append("[irl][irr]join=inputs=2:channel_layout=stereo[ir]")
         lines.append(f"[{last}]asplit=2[dry][send]")
-        lines.append(f"[send][ir]afir=dry=1:wet=1{afir_norm()}[wet]")
-        lines.append(f"[dry][wet]amix=inputs=2:weights=1 {wet}:normalize=0:duration=first[rv]")
+        # pre-delay keeps the original clear; the low-cut stops the tail turning the bass to mud
+        lines.append(f"[send]adelay={predelay}|{predelay},highpass=f=180[sendp]")
+        lines.append(f"[sendp][ir]afir=dry=1:wet=1{afir_norm()}[wet]")
+        lines.append(f"[dry][wet]amix=inputs=2:weights=1 {wet:.5f}:normalize=0:duration=first[rv]")
         last = "rv"
         total += 0  # the tail is cut to the song length (duration=first)
     post = []
@@ -535,7 +548,7 @@ def update_song(sid):
     body = request.json or {}
     with lib.lock:
         song = lib.songs.get(sid) or abort(404)
-        for k in ("title", "artist", "liked"):
+        for k in ("title", "artist", "liked", "hidden"):
             if k in body:
                 song[k] = body[k]
         lib.save()
@@ -731,6 +744,7 @@ def edit_opts(body: dict) -> dict:
         "fadeOut": float(body.get("fadeOut", 0) or 0),
         "reverb": body.get("reverb") if body.get("reverb") in REVERBS else None,
         "semitones": float(body.get("semitones", 0) or 0),
+        "reverbAmount": float(body.get("reverbAmount", 0.7) or 0),
         "warm": bool(body.get("warm")),
     }
 

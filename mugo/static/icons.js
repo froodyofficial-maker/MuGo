@@ -52,6 +52,8 @@ const ICONS = {
   stop: '<rect fill="currentColor" stroke="none" x="6" y="6" width="12" height="12" rx="1.5"/>',
   ffwd: '<path fill="currentColor" stroke="none" d="M3 6v12l9-6zM12 6v12l9-6z"/>',
   rew: '<path fill="currentColor" stroke="none" d="M21 6v12l-9-6zM12 6v12l-9-6z"/>',
+  eyeOff: '<path d="M10.7 5.1A10 10 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-2.2 3.2M6.6 6.6C3.9 8.4 2 12 2 12s3.5 7 10 7a9.6 9.6 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2M2 2l20 20"/>',
+  eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
   disc: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/>',
 };
 function icon(name, cls = '') {

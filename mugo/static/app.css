@@ -587,3 +587,5 @@ kbd { font: 600 11px ui-monospace, monospace; color: var(--faint); border: 1px s
 .np.shaking .np-art { transition: none; }
 
 @media (max-width: 860px) { .np-pill span { display: none; } }
+
+.tag .ic { width: 12px; height: 12px; }
