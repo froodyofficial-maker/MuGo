@@ -34,7 +34,12 @@ Double-click it, and MuGo opens. That's it: ffmpeg and the YouTube downloader ar
   - **Keep pitch** changes only the tempo, using the studio-grade [Rubber Band](https://breakfastquay.com/rubberband/) time-stretch engine.
   - **Extra depth** shifts the whole song down (or up) by semitones without changing speed. **Warm, heavy tone** boosts the bass and softens the highs.
   - **Convolution reverb** (Room / Hall / Dreamy) with an **amount** slider, for the slowed + reverb sound: from a subtle space up to an echo as loud as the song. It has pre-delay and a low-cut so the song stays clear, and you hear it live in the quick preview. A limiter keeps everything from clipping, and edits are saved as 256 kbps AAC.
-  - **🎧 8D audio:** the music slowly circles around your head on headphones. It combines left/right movement, a duller sound when it passes behind you, and "head shadow" on the far ear. Use it on the whole song, or select parts and press **8D this part**. The rotation speed is adjustable, and you hear it live in the preview.
+  - **🎧 3D / 8D audio (16D binaural engine):** the music plays at a moving point around you inside a virtual room, the way "16D" tracks are made. It uses a binaural head model, so you get real time and tone differences between your ears, front/back and height cues, and the far ear is softened by your head. Echoes from all six walls/floor/ceiling each arrive from their own direction, plus the room's diffuse tail, and the bass stays centred.
+    - **Movement:** circle, figure 8, ping-pong, spiral or wander, clockwise or counter-clockwise
+    - **Speed, distance, breathing** (drifting closer and further away), **height** and **stereo width**
+    - **Room:** none, small room, empty room, big empty hall or cathedral, plus a room-amount slider
+    - **Keep bass centred** on or off, and a **live radar** showing where the music is
+    - Apply it to the whole song or only to parts marked with **8D this part**. The live preview uses the same engine as the saved file. **Classic 8D** (simple left/right circling) is still available.
   - **Hi-Fi preview** renders the edit with the real engine so you hear exactly what will be saved. The quick preview is instant but only approximates the sound.
   - Set fade in/out, undo/redo, zoom (`Ctrl`+scroll) and preview the edit live before saving.
   - **Save as new song** renders it with ffmpeg into your library. The original is kept.

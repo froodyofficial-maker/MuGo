@@ -45,6 +45,11 @@ const Studio = (() => {
           return g;
         });
         this.e8 = c.createGain(); this.e8.gain.value = 0; merger.connect(this.e8).connect(this.post);
+        // 16D: binaural spatial graph (rebuilt when the room / bass settings change)
+        this.spIn = c.createGain(); this.high.connect(this.spIn);
+        this.spMake = c.createGain(); this.spGate = c.createGain(); this.spGate.gain.value = 0;
+        this.spMake.connect(this.spGate).connect(this.post);
+        this.rebuildSpatial();
         this.post.connect(this.dry).connect(c.destination);
         this.post.connect(this.delay).connect(this.hp).connect(this.conv).connect(this.wet).connect(c.destination);
         this.en = 0;
@@ -79,7 +84,7 @@ const Studio = (() => {
       this.low.gain.setTargetAtTime(warm ? 5 : 0, t, .05);
       this.mid.gain.setTargetAtTime(warm ? 1.5 : 0, t, .05);
       this.high.gain.setTargetAtTime(warm ? -4 : 0, t, .05);
-      if (st.reverb && REVERBS[st.reverb]) {
+      if (st.reverb && REVERBS[st.reverb] && !(st.eightD !== 'off' && st.sp.engine === 'binaural')) {
         if (this.conv.buffer !== this.ir(st.reverb)) this.conv.buffer = this.ir(st.reverb);
         this.delay.delayTime.value = REVERBS[st.reverb][1];
         const relDb = -16 + 17 * st.reverbAmount;               // same mapping as the server
@@ -87,6 +92,13 @@ const Studio = (() => {
       } else this.wet.gain.setTargetAtTime(0, t, .05);
     },
     cal: 4.6,  // measured: browser wet level at gain 1 vs dry (server uses 6.3)
+    rebuildSpatial() {
+      if (!this.ctx || !st) return;
+      if (this.sp) { try { this.spIn.disconnect(); this.sp.output.disconnect(); } catch {} }
+      this.sp = Spatial.build(this.ctx, st.sp);   // live object: path settings apply instantly
+      this.spIn.connect(this.sp.input); this.sp.output.connect(this.spMake);
+      this.match = Spatial.makeMatcher(this.ctx, this.spIn, this.sp.output, this.spMake);
+    },
     /** per-frame 8D motion; `t` is the position in the ORIGINAL song */
     frame(t) {
       if (!this.ctx || !st || !this.ear) return;
@@ -105,8 +117,14 @@ const Studio = (() => {
         set(g.back.gain, k * (1 - shad[i]) * (1 - fb));
         set(g.shadow.gain, k * shad[i]);
       });
-      set(this.e8.gain, .85 * en);
-      set(this.orig.gain, 1 - .85 * en);
+      if (st.sp.engine === 'binaural') {
+        set(this.e8.gain, 0); set(this.spGate.gain, en); set(this.orig.gain, 1 - en);
+        if (en > .001) { this.sp.s = st.sp; Spatial.place(this.sp, outTime(t)); this.match(); }
+      } else {
+        set(this.spGate.gain, 0);
+        set(this.e8.gain, .85 * en);
+        set(this.orig.gain, 1 - .85 * en);
+      }
     },
   };
   /** map an original-song time to the time in the edited output (cuts removed, speed applied) */
@@ -131,7 +149,7 @@ const Studio = (() => {
     stop();
     st = {
       id, song, dur: song.duration || 0, peaks: null, segs: [], sel: null, hist: [], fut: [],
-      zoom: 1, eightD: 'off', eightDPeriod: 8, pitch: store.get('studioPitch', 'vinyl'), semitones: 0, warm: false, reverb: '', reverbAmount: .7, fadeIn: 0, fadeOut: 0, playhead: 0, titleTouched: false, hover: null,
+      zoom: 1, eightD: 'off', eightDPeriod: 8, sp: { ...Spatial.DEFAULTS, room: 'studio', roomAmt: .7, ...store.get('spatial', {}) }, pitch: store.get('studioPitch', 'vinyl'), semitones: 0, warm: false, reverb: '', reverbAmount: .7, fadeIn: 0, fadeOut: 0, playhead: 0, titleTouched: false, hover: null,
     };
     renderShell();
     load();
@@ -206,6 +224,30 @@ const Studio = (() => {
         </div>
       </div>
 
+
+      <div class="panel sp-panel" data-s="spPanel">
+        <div class="sp-head"><div><h4 style="margin:0">3D / 8D audio 🎧</h4><small>Put on headphones. The music moves around you inside a virtual room</small></div>
+          <div class="seg-toggle" data-s="eightD"><button data-v="off">Off</button><button data-v="all">Whole song</button><button data-v="parts">Marked parts</button></div></div>
+        <div class="sp-body">
+          <div class="sp-controls">
+            <div class="opt-row"><div><b>Engine</b><small><b>16D</b>: binaural head model and real room reflections, for depth and space · <b>Classic 8D</b>: simple left/right circling</small></div>
+              <div class="seg-toggle" data-s="spEngine"><button data-v="binaural">16D · binaural</button><button data-v="classic">Classic 8D</button></div></div>
+            <div class="opt-row sp-bin"><div><b>Movement</b><small>The path the music takes around you</small></div>
+              <div class="seg-toggle" data-s="spMotion"><button data-v="circle">Circle</button><button data-v="figure8">Figure 8</button><button data-v="pingpong">Ping-pong</button><button data-v="spiral">Spiral</button><button data-v="wander">Wander</button></div></div>
+            <div class="opt-row sp-bin"><div><b>Direction</b></div><div class="seg-toggle" data-s="spDir"><button data-v="1">Clockwise</button><button data-v="-1">Counter-clockwise</button></div></div>
+            <div class="opt-row"><div><b>Speed</b><small>Seconds for one full lap</small></div><div class="sp-slider"><span class="sel-label">fast</span><input type="range" min="3" max="30" step="0.5" data-s="period" style="width:150px"><span class="sel-label">slow</span><b data-s="periodVal"></b></div></div>
+            <div class="opt-row sp-bin"><div><b>Distance</b><small>How far from your head the music plays</small></div><div class="sp-slider"><span class="sel-label">close</span><input type="range" min="0.5" max="4" step="0.1" data-s="spDist" style="width:150px"><span class="sel-label">far</span><b data-s="spDistVal"></b></div></div>
+            <div class="opt-row sp-bin"><div><b>Breathing</b><small>Drifts closer and further away</small></div><div class="sp-slider"><span class="sel-label">none</span><input type="range" min="0" max="100" step="5" data-s="spBreath" style="width:150px"><span class="sel-label">lots</span><b data-s="spBreathVal"></b></div></div>
+            <div class="opt-row sp-bin"><div><b>Height</b><small>Rises above and dips below your ears</small></div><div class="sp-slider"><span class="sel-label">flat</span><input type="range" min="0" max="100" step="5" data-s="spHeight" style="width:150px"><span class="sel-label">high</span><b data-s="spHeightVal"></b></div></div>
+            <div class="opt-row sp-bin"><div><b>Width</b><small>Keeps some of the song's stereo spread</small></div><div class="sp-slider"><span class="sel-label">point</span><input type="range" min="0" max="100" step="5" data-s="spWidth" style="width:150px"><span class="sel-label">wide</span><b data-s="spWidthVal"></b></div></div>
+            <div class="opt-row sp-bin"><div><b>Room</b><small>The space you're standing in</small></div>
+              <div class="seg-toggle" data-s="spRoom"><button data-v="none">None</button><button data-v="small">Small room</button><button data-v="studio">Empty room</button><button data-v="hall">Big empty hall</button><button data-v="cathedral">Cathedral</button></div></div>
+            <div class="opt-row sp-bin"><div><b>Room amount</b><small>Echoes from the walls, floor and ceiling, plus the room's tail</small></div><div class="sp-slider"><span class="sel-label">dry</span><input type="range" min="0" max="100" step="5" data-s="spRoomAmt" style="width:150px"><span class="sel-label">roomy</span><b data-s="spRoomAmtVal"></b></div></div>
+            <div class="opt-row sp-bin"><div><b>Keep bass centred</b><small>Bass stays solid in the middle, like pro 16D mixes</small></div><div class="seg-toggle" data-s="spBass"><button data-v="1">On</button><button data-v="0">Off</button></div></div>
+          </div>
+          <div class="sp-radar"><canvas data-s="radar"></canvas><div class="sel-label">Top view · the dot is the music (bigger = higher) · dashed box = room</div></div>
+        </div>
+      </div>
       <div class="st-grid">
         <div class="panel">
           <h4>Edits</h4>
@@ -221,11 +263,7 @@ const Studio = (() => {
             <div style="display:flex;align-items:center;gap:10px"><input type="range" min="-12" max="6" step="0.5" value="0" data-s="semis" style="width:130px;accent-color:#f472b6"><b data-s="semisVal" style="width:92px;text-align:right;font-variant-numeric:tabular-nums">0 semitones</b></div></div>
           <div class="opt-row"><div><b>Warm, heavy tone</b><small>Boosts the bass and softens the highs for a darker sound</small></div>
             <div class="seg-toggle" data-s="warm"><button data-v="0" class="on">Off</button><button data-v="1">On</button></div></div>
-          <div class="opt-row"><div><b>8D audio 🎧</b><small>The music circles around your head. Use headphones. Mark parts with “8D this part” or use it on the whole song</small></div>
-            <div class="seg-toggle" data-s="eightD"><button data-v="off" class="on">Off</button><button data-v="all">Whole song</button><button data-v="parts">Marked parts</button></div></div>
-          <div class="opt-row" data-s="periodRow" style="opacity:.4;pointer-events:none"><div><b>8D rotation</b><small>Seconds for one full circle around your head</small></div>
-            <div style="display:flex;align-items:center;gap:10px"><span class="sel-label">fast</span><input type="range" min="3" max="20" step="0.5" value="8" data-s="period" style="width:110px;accent-color:#c084fc"><span class="sel-label">slow</span><b data-s="periodVal" style="width:40px;text-align:right;font-variant-numeric:tabular-nums">8 s</b></div></div>
-          <div class="opt-row"><div><b>Reverb</b><small>Convolution reverb, the “slowed + reverb” sound. You hear it in the preview too</small></div>
+          <div class="opt-row" data-s="reverbRow"><div><b>Reverb</b><small data-s="reverbNote">Convolution reverb, the “slowed + reverb” sound. You hear it in the preview too</small></div>
             <div class="seg-toggle" data-s="reverb"><button data-v="" class="on">Off</button><button data-v="room">Room</button><button data-v="hall">Hall</button><button data-v="dreamy">Dreamy</button></div></div>
           <div class="opt-row" data-s="amountRow" style="opacity:.4;pointer-events:none"><div><b>Reverb amount</b><small>How loud the echo is compared to the song</small></div>
             <div style="display:flex;align-items:center;gap:10px"><input type="range" min="0" max="100" step="5" value="70" data-s="revAmt" style="width:130px;accent-color:#f472b6"><b data-s="revAmtVal" style="width:44px;text-align:right;font-variant-numeric:tabular-nums">70%</b></div></div>
@@ -357,7 +395,8 @@ const Studio = (() => {
     // smart title
     if (!st.titleTouched) {
       const k = kept(); const allSlow = k.length && k.every(s => s.speed < 1), allFast = k.length && k.every(s => s.speed > 1);
-      q('title').value = `${st.song.title} (${allSlow ? 'slowed' : allFast ? 'sped up' : 'edit'})`;
+      const tag = st.eightD === 'off' ? '' : st.sp.engine === 'binaural' ? ' · 16D' : ' · 8D';
+      q('title').value = `${st.song.title} (${allSlow ? 'slowed' : allFast ? 'sped up' : 'edit'}${tag})`;
     }
   }
   function fmtMs(t) { t = Math.max(0, t); const m = Math.floor(t / 60), s = t - m * 60; return `${m}:${s.toFixed(1).padStart(4, '0')}`; }
@@ -441,11 +480,31 @@ const Studio = (() => {
     q('ruler').innerHTML = html;
   }
 
+  /** options for the server render; in 16D mode the server skips 8D + reverb and the browser adds the 3D stage */
+  function renderOpts() {
+    const on = spatialOn();
+    return { source: st.id, pitch: st.pitch, semitones: st.semitones, warm: st.warm,
+      reverb: on ? '' : st.reverb, reverbAmount: st.reverbAmount,
+      eightD: on ? 'off' : st.eightD, eightDPeriod: st.eightDPeriod, fadeIn: st.fadeIn, fadeOut: st.fadeOut };
+  }
+  /** full-quality 16D render: server does cuts/speed/tone, then the binaural room is rendered here */
+  async function render3D(segs, label) {
+    const r = await api.preview({ ...renderOpts(), segments: segs });
+    const ab = await (await fetch(r.url)).arrayBuffer();
+    const buf = await new OfflineAudioContext(2, 1, 44100).decodeAudioData(ab);
+    const parts = partsIntervals();
+    const gate = st.eightD === 'all' ? null : t => gateAt(parts, t);
+    return Spatial.renderOffline(buf, { ...st.sp }, gate, p => label(`3D ${Math.round(p * 100)}%`));
+  }
+
   /* ---------------- Hi-Fi preview (server render, exact final sound) ---------------- */
   const hq = new Audio(); hq.preload = 'auto';
-  let hqRaf = 0;
+  let hqRaf = 0, hqBuf = null;   // hqBuf = { ctx, src, t0, dur } when playing a 16D render
+  const hqTime = () => hqBuf ? hqBuf.ctx.currentTime - hqBuf.t0 : hq.currentTime;
+  const hqPlaying = () => !!hqBuf || !hq.paused;
   function hqStop() {
     hq.pause(); cancelAnimationFrame(hqRaf);
+    if (hqBuf) { try { hqBuf.src.stop(); hqBuf.ctx.close(); } catch {} hqBuf = null; }
     const b = root?.querySelector('[data-s="hifi"]');
     if (b) { b.disabled = false; b.innerHTML = `${icon('sparkles')}<span>Hi-Fi preview</span>`; }
     const l = root?.querySelector('[data-s="clockLbl"]'); if (l) l.textContent = 'quick preview · playhead';
@@ -453,18 +512,33 @@ const Studio = (() => {
   }
   async function hifi() {
     if (!st?.peaks) return;
-    if (!hq.paused) return hqStop();
+    if (hqPlaying()) return hqStop();
     stop(); if (!audio.paused) Player.pause();
     const segs = kept().map(s => ({ start: +s.start.toFixed(3), end: +s.end.toFixed(3), speed: s.speed, d8: !!s.d8 }));
     if (!segs.length) return toast('Everything is cut — nothing to play', { error: true });
     const b = q('hifi'); b.disabled = true; b.innerHTML = `<span class="mini-bar indet" style="width:60px"><div></div></span><span>Rendering…</span>`;
     try {
-      const r = await api.preview({ source: st.id, segments: segs, pitch: st.pitch, semitones: st.semitones, warm: st.warm, reverb: st.reverb, reverbAmount: st.reverbAmount, eightD: st.eightD, eightDPeriod: st.eightDPeriod, fadeIn: st.fadeIn, fadeOut: st.fadeOut });
-      if (!q('hifi')) return;
-      hq.src = r.url; await hq.play();
+      let dur;
+      if (spatialOn()) {
+        const out = await render3D(segs, txt => { if (q('hifi')) b.innerHTML = `<span class="mini-bar indet" style="width:60px"><div></div></span><span>${txt}</span>`; });
+        if (!q('hifi')) return;
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const src = ctx.createBufferSource(); src.buffer = out; src.connect(ctx.destination);
+        hqBuf = { ctx, src, t0: ctx.currentTime + .05 }; src.start(hqBuf.t0); dur = out.duration;
+        src.onended = () => { if (hqBuf && hqBuf.src === src) hqStop(); };
+      } else {
+        const r = await api.preview({ ...renderOpts(), segments: segs });
+        if (!q('hifi')) return;
+        hq.src = r.url; await hq.play(); dur = r.duration;
+      }
       b.disabled = false; b.innerHTML = `${icon('stop')}<span>Stop Hi-Fi</span>`;
       q('clockLbl').textContent = 'Hi-Fi preview · final render';
-      const tick = () => { if (hq.paused || !q('clock')) return hqStop(); q('clock').textContent = `${fmt(hq.currentTime)} / ${fmt(hq.duration || r.duration)}`; hqRaf = requestAnimationFrame(tick); };
+      const tick = () => {
+        if (!hqPlaying() || !q('clock')) return hqStop();
+        q('clock').textContent = `${fmt(Math.max(0, hqTime()))} / ${fmt(hq.duration || dur)}`;
+        if (spatialOn()) radar('hq');
+        hqRaf = requestAnimationFrame(tick);
+      };
       tick();
     } catch (e) { toast(e.message, { error: true }); hqStop(); }
   }
@@ -473,7 +547,7 @@ const Studio = (() => {
   /* ---------------- preview playback ---------------- */
   function startPreview(from, until = null) {
     if (!st?.peaks) return;
-    if (!hq.paused) hqStop();
+    if (hqPlaying()) hqStop();
     if (!audio.paused) Player.pause();
     let t = from ?? st.playhead;
     if (t >= st.dur - 0.05) t = 0;
@@ -501,6 +575,7 @@ const Studio = (() => {
     const sp = segAt(t).speed; if (Math.abs(pa.playbackRate - sp) > 1e-3) pa.playbackRate = sp;
     st.playhead = t;
     fx.frame(t);
+    radar(true);
     draw();
     // keep playhead in view when zoomed
     const wrap = q('wrap'); const X = t / st.dur * q('inner').clientWidth;
@@ -509,13 +584,51 @@ const Studio = (() => {
   }
   pa.addEventListener('ended', () => { stop(); if (st) { st.playhead = 0; draw(); } });
 
+  const spatialOn = () => st.eightD !== 'off' && st.sp.engine === 'binaural';
   function setEightD(v) {
     st.eightD = v;
-    q('eightD').querySelectorAll('button').forEach(x => x.classList.toggle('on', x.dataset.v === v));
-    const row = q('periodRow'); row.style.opacity = v !== 'off' ? 1 : .4; row.style.pointerEvents = v !== 'off' ? '' : 'none';
     if (v === 'parts' && !st.segs.some(s => s.d8)) toast('Select a part of the waveform, then press “8D this part”');
+    syncSpatial();
+  }
+  /** reflect st.sp / st.eightD in the panel, remember settings, refresh live audio + radar */
+  function syncSpatial(structural = false) {
+    const sp = st.sp, P = q('spPanel'); if (!P) return;
+    const tog = (k, v) => q(k).querySelectorAll('button').forEach(x => x.classList.toggle('on', x.dataset.v === String(v)));
+    tog('eightD', st.eightD); tog('spEngine', sp.engine); tog('spMotion', sp.motion); tog('spDir', sp.dir); tog('spRoom', sp.room); tog('spBass', sp.keepBass ? 1 : 0);
+    const val = (k, v, txt) => { const el = q(k); if (document.activeElement !== el) el.value = v; q(k + 'Val').textContent = txt; };
+    val('period', sp.period, sp.period + ' s'); val('spDist', sp.distance, sp.distance.toFixed(1) + ' m');
+    val('spBreath', Math.round(sp.breath * 100), Math.round(sp.breath * 100) + '%'); val('spHeight', Math.round(sp.height * 100), Math.round(sp.height * 100) + '%');
+    val('spWidth', Math.round(sp.width * 100), Math.round(sp.width * 100) + '%'); val('spRoomAmt', Math.round(sp.roomAmt * 100), Math.round(sp.roomAmt * 100) + '%');
+    P.classList.toggle('classic', sp.engine === 'classic'); P.classList.toggle('off', st.eightD === 'off');
+    q('spRoomAmt').closest('.opt-row').style.opacity = sp.room === 'none' ? .4 : '';
+    st.eightDPeriod = sp.period;
+    // in 16D mode the room replaces the separate reverb
+    const rr = q('reverbRow'), on = spatialOn();
+    rr.style.opacity = on ? .4 : ''; rr.style.pointerEvents = on ? 'none' : '';
+    q('reverbNote').textContent = on ? 'Turned off while 16D is on: the 3D room provides the space' : 'Convolution reverb, the “slowed + reverb” sound. You hear it in the preview too';
+    store.set('spatial', sp);
+    if (structural) fx.rebuildSpatial();
+    fx.update();
+    radar(false);
     draw();
   }
+  function radar(live) {
+    const cv = q('radar'); if (!cv) return;
+    const t = live === 'hq' ? hqTime() : outTime(st.playhead);
+    Spatial.drawRadar(cv, st.sp, t, !!live && st.eightD !== 'off');
+  }
+  /** output-time spans of the parts marked for 8D */
+  function partsIntervals() {
+    const out = []; let o = 0;
+    for (const s of st.segs) {
+      if (s.cut) continue;
+      const len = (s.end - s.start) / s.speed;
+      if (s.d8) { const last = out[out.length - 1]; if (last && Math.abs(last[1] - o) < 1e-3) last[1] = o + len; else out.push([o, o + len]); }
+      o += len;
+    }
+    return out;
+  }
+  const gateAt = (parts, t) => Math.min(1, parts.reduce((a, [x, y]) => a + Math.min(1, Math.max(0, (t - x) / .6)) * Math.min(1, Math.max(0, (y - t) / .6)), 0));
 
   /* ---------------- events ---------------- */
   function bind() {
@@ -617,7 +730,23 @@ const Studio = (() => {
       fx.update();
     });
     q('eightD').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setEightD(b.dataset.v); });
-    q('period').addEventListener('input', e => { st.eightDPeriod = +e.target.value; q('periodVal').textContent = st.eightDPeriod + ' s'; });
+    const pick = (k, fn, structural) => q(k).addEventListener('click', e => { const b = e.target.closest('button'); if (b) { fn(b.dataset.v); syncSpatial(structural); } });
+    pick('spEngine', v => st.sp.engine = v, true);
+    pick('spMotion', v => st.sp.motion = v);
+    pick('spDir', v => st.sp.dir = +v);
+    pick('spRoom', v => st.sp.room = v, true);
+    pick('spBass', v => st.sp.keepBass = v === '1', true);
+    const slide = (k, fn, structural) => {
+      q(k).addEventListener('input', e => { fn(+e.target.value); syncSpatial(false); });
+      if (structural) q(k).addEventListener('change', () => syncSpatial(true));
+    };
+    slide('period', v => st.sp.period = v);
+    slide('spDist', v => st.sp.distance = v);
+    slide('spBreath', v => st.sp.breath = v / 100);
+    slide('spHeight', v => st.sp.height = v / 100);
+    slide('spWidth', v => st.sp.width = v / 100);
+    slide('spRoomAmt', v => st.sp.roomAmt = v / 100, true);
+    syncSpatial();
     q('revAmt').addEventListener('input', e => {
       st.reverbAmount = +e.target.value / 100; q('revAmtVal').textContent = e.target.value + '%'; fx.update();
     });
@@ -640,12 +769,24 @@ const Studio = (() => {
     const segs = kept().map(s => ({ start: +s.start.toFixed(3), end: +s.end.toFixed(3), speed: s.speed, d8: !!s.d8 }));
     if (!segs.length) return toast('Everything is cut — nothing to save', { error: true });
     const btn = q('save'); btn.disabled = true;
+    const label = btn.innerHTML;
     try {
-      const song = await api.edit({ source: st.id, segments: segs, pitch: st.pitch, semitones: st.semitones, warm: st.warm, reverb: st.reverb, reverbAmount: st.reverbAmount, eightD: st.eightD, eightDPeriod: st.eightDPeriod, fadeIn: st.fadeIn, fadeOut: st.fadeOut, title: q('title').value.trim() });
-      toast('Rendering your edit…', { img: thumb(st.song), sub: song.title });
+      const title = q('title').value.trim();
+      if (spatialOn()) {
+        const out = await render3D(segs, txt => { btn.innerHTML = `<span class="mini-bar indet" style="width:60px"><div></div></span><span>Rendering ${txt}</span>`; });
+        btn.innerHTML = `<span class="mini-bar indet" style="width:60px"><div></div></span><span>Saving…</span>`;
+        const fd = new FormData();
+        fd.append('audio', Spatial.encodeWav(out), 'edit.wav'); fd.append('source', st.id); fd.append('title', title);
+        const r = await fetch('/api/edit/upload', { method: 'POST', body: fd });
+        const song = await r.json(); if (!r.ok) throw new Error(song.error || 'Saving failed');
+        toast('Saved to your library 🎧', { img: thumb(st.song), sub: song.title });
+      } else {
+        const song = await api.edit({ ...renderOpts(), segments: segs, title });
+        toast('Rendering your edit…', { img: thumb(st.song), sub: song.title });
+      }
       refresh(true);
     } catch (e) { toast(e.message, { error: true }); }
-    btn.disabled = false;
+    btn.disabled = false; btn.innerHTML = label;
   }
 
   function onKey(e) {

@@ -561,7 +561,7 @@ def render_edit(new_id: str, src_path: Path, segments, opts: dict):
 # HTTP API
 # --------------------------------------------------------------------------
 app = Flask(__name__, static_folder=None)
-app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # cover uploads
+app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024  # 16D renders arrive as WAV (≈10 MB per minute)
 
 
 @app.after_request
@@ -650,6 +650,8 @@ def upload_thumb(sid):
     if not f:
         return jsonify({"error": "No image received"}), 400
     data = f.read()
+    if len(data) > 25 * 1024 * 1024:
+        return jsonify({"error": "That image is too big (max 25 MB)"}), 413
     if not data.startswith(IMAGE_MAGIC) and b"ftypavif" not in data[:32] and b"ftypheic" not in data[:32]:
         return jsonify({"error": "That file isn't an image MuGo can use (try JPG, PNG or WebP)"}), 400
     out = THUMB_DIR / f"{sid}.jpg"
@@ -800,6 +802,45 @@ def edit():
     threading.Thread(
         target=render_edit, args=(new_id, AUDIO_DIR / src["file"], segs, edit_opts(body)), daemon=True,
     ).start()
+    return jsonify(song)
+
+
+@app.post("/api/edit/upload")
+def edit_upload():
+    """Save an edit that was finished in the browser (16D binaural render) as a new song."""
+    src = lib.songs.get(request.form.get("source", "")) or abort(404)
+    f = request.files.get("audio")
+    if not f:
+        return jsonify({"error": "No audio received"}), 400
+    new_id = "edit-" + uuid.uuid4().hex[:8]
+    title = (request.form.get("title") or f"{src['title']} (16D)").strip()[:120]
+    tmp = AUDIO_DIR / f"{new_id}.upload.wav"
+    f.save(tmp)
+    out = AUDIO_DIR / f"{new_id}.m4a"
+    try:
+        import wave
+        with wave.open(str(tmp)) as w:
+            duration = w.getnframes() / w.getframerate()
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(tmp),
+             "-c:a", "aac", "-b:a", "256k", "-vn", str(out)],
+            capture_output=True, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if r.returncode != 0:
+            raise RuntimeError(r.stderr.strip()[-300:] or "ffmpeg failed")
+    except Exception as e:
+        out.unlink(missing_ok=True)
+        return jsonify({"error": f"Saving failed: {e}"}), 500
+    finally:
+        tmp.unlink(missing_ok=True)
+    song = new_song(new_id, src["url"], title)
+    song.update(artist=src.get("artist", ""), source="edit", parent=src["id"], status="ready", progress=100,
+                file=out.name, duration=round(duration, 2), thumb=src.get("thumb", False))
+    if src.get("thumb"):
+        shutil.copy(THUMB_DIR / f"{src['id']}.jpg", THUMB_DIR / f"{new_id}.jpg")
+    with lib.lock:
+        lib.songs[new_id] = song
+        lib.save()
     return jsonify(song)
 
 
