@@ -32,7 +32,8 @@ const Studio = (() => {
         src.connect(this.low).connect(this.mid).connect(this.high);
         // 8D stage (same recipe as the server): mono → front/behind/head-shadow paths → per-ear gains
         this.post = c.createGain();
-        this.orig = c.createGain(); this.high.connect(this.orig).connect(this.post);
+        this.orig = c.createGain(); this.origDelay = c.createDelay(1);
+        this.high.connect(this.origDelay).connect(this.orig).connect(this.post);
         const mono = c.createGain(); mono.channelCount = 1; mono.channelCountMode = 'explicit'; mono.channelInterpretation = 'speakers';
         const lp = f => { const b = c.createBiquadFilter(); b.type = 'lowpass'; b.frequency.value = f; return b; };
         const back = lp(3200), back2 = lp(3200), shadow = lp(1300);
@@ -118,9 +119,11 @@ const Studio = (() => {
         set(g.shadow.gain, k * shad[i]);
       });
       if (st.sp.engine === 'binaural') {
+        this.origDelay.delayTime.value = Spatial.latency / this.ctx.sampleRate;  // keep the original lined up with the 3D path
         set(this.e8.gain, 0); set(this.spGate.gain, en); set(this.orig.gain, 1 - en);
         if (en > .001) { this.sp.s = st.sp; Spatial.place(this.sp, outTime(t)); this.match(); }
       } else {
+        this.origDelay.delayTime.value = 0;
         set(this.spGate.gain, 0);
         set(this.e8.gain, .85 * en);
         set(this.orig.gain, 1 - .85 * en);
@@ -149,7 +152,7 @@ const Studio = (() => {
     stop();
     st = {
       id, song, dur: song.duration || 0, peaks: null, segs: [], sel: null, hist: [], fut: [],
-      zoom: 1, eightD: 'off', eightDPeriod: 8, sp: { ...Spatial.DEFAULTS, room: 'studio', roomAmt: .7, ...store.get('spatial', {}) }, pitch: store.get('studioPitch', 'vinyl'), semitones: 0, warm: false, reverb: '', reverbAmount: .7, fadeIn: 0, fadeOut: 0, playhead: 0, titleTouched: false, hover: null,
+      zoom: 1, speedV: .8, eightD: 'off', eightDPeriod: 8, sp: { ...Spatial.DEFAULTS, room: 'studio', roomAmt: .7, ...store.get('spatial', {}) }, pitch: store.get('studioPitch', 'vinyl'), semitones: 0, warm: false, reverb: '', reverbAmount: .7, fadeIn: 0, fadeOut: 0, playhead: 0, titleTouched: false, hover: null,
     };
     renderShell();
     load();
@@ -219,7 +222,7 @@ const Studio = (() => {
             <button class="btn ghost" data-s="resetSel">${icon('refresh')}<span>Reset part</span></button>
           </div>
           <span class="sep"></span>
-          <div class="speed-box">${icon('turtle')}<input type="range" min="0.5" max="1.5" step="0.05" value="0.8" data-s="speed"><b data-s="speedVal">0.80×</b>
+          <div class="speed-box">${icon('turtle')}<input type="range" min="0.5" max="1.5" step="0.05" value="0.8" data-s="speed"><input class="speed-num" data-s="speedVal" value="0.80" inputmode="decimal" spellcheck="false" title="Type any speed from 0.25 to 3, e.g. 0.83, 83% or 1.07. Enter applies, ↑/↓ nudge"><span class="speed-x">×</span>
             <button class="btn primary" data-s="applySpeed" style="height:30px;padding:0 14px"><span data-s="speedLbl">Apply</span></button></div>
         </div>
       </div>
@@ -354,10 +357,10 @@ const Studio = (() => {
       toast(turnOn ? '8D on for this part 🎧' : '8D removed from this part');
     }
     else if (name === 'speed') {
-      const v = +q('speed').value;
+      const v = st.speedV;
       const [a, b] = sel ? [sel.a, sel.b] : [0, st.dur];
       apply(a, b, s => s.speed = v);
-      toast(`${v < 1 ? 'Slowed' : v > 1 ? 'Sped up' : 'Normal speed for'} ${sel ? 'selection' : 'whole song'}${v !== 1 ? ' to ' + v.toFixed(2) + '×' : ''}`);
+      toast(`${v < 1 ? 'Slowed' : v > 1 ? 'Sped up' : 'Normal speed for'} ${sel ? 'selection' : 'whole song'}${v !== 1 ? ' to ' + spd(v) : ''}`);
     }
     else if (name === 'resetAll') st.segs = [{ start: 0, end: st.dur, speed: 1, cut: false }];
     else return;
@@ -388,7 +391,7 @@ const Studio = (() => {
     const edits = st.segs.filter(s => s.cut || s.speed !== 1 || s.d8);
     q('segList').innerHTML = edits.length ? edits.map(s => {
       const c = s.cut ? COLORS.cut : s.speed < 1 ? COLORS.slow : s.speed > 1 ? COLORS.fast : COLORS.d8;
-      const lbl = s.cut ? 'Cut out' : [s.speed !== 1 ? (s.speed < 1 ? 'Slowed' : 'Sped up') + ` · ${s.speed.toFixed(2)}×` : '', s.d8 ? '8D audio' : ''].filter(Boolean).join(' + ');
+      const lbl = s.cut ? 'Cut out' : [s.speed !== 1 ? (s.speed < 1 ? 'Slowed' : 'Sped up') + ` · ${spd(s.speed)}` : '', s.d8 ? '8D audio' : ''].filter(Boolean).join(' + ');
       return `<div class="seg-row" data-seg="${s.start}|${s.end}"><span class="dot" style="background:rgb(${c})"></span><span class="lbl">${lbl}</span>
         <span style="color:var(--muted)">${fmtMs(s.start)} → ${fmtMs(s.end)}</span><button class="icon-btn" data-undo-seg="${s.start}|${s.end}" title="Reset this part">${icon('close')}</button></div>`;
     }).join('') : `<div style="color:var(--faint);padding:8px 2px;line-height:1.6">No edits yet. Select a part of the waveform, then cut it out, keep only it, or change its speed.</div>`;
@@ -399,6 +402,7 @@ const Studio = (() => {
       q('title').value = `${st.song.title} (${allSlow ? 'slowed' : allFast ? 'sped up' : 'edit'}${tag})`;
     }
   }
+  const spd = v => +(+v).toFixed(3) + '×';
   function fmtMs(t) { t = Math.max(0, t); const m = Math.floor(t / 60), s = t - m * 60; return `${m}:${s.toFixed(1).padStart(4, '0')}`; }
   function parseTime(v) {
     v = String(v).trim(); if (!v) return NaN;
@@ -431,7 +435,7 @@ const Studio = (() => {
         x.restore();
       }
       x.fillStyle = `rgba(${c},.9)`; x.fillRect(X(s.start), 0, X(s.end) - X(s.start), 3);
-      if (!s.cut) { x.font = '700 11px system-ui'; x.fillText(`${s.speed.toFixed(2)}×`, X(s.start) + 6, 17); }
+      if (!s.cut) { x.font = '700 11px system-ui'; x.fillText(spd(s.speed), X(s.start) + 6, 17); }
     }
     // 8D parts: purple band along the bottom with a label
     for (const s of st.segs) {
@@ -489,7 +493,7 @@ const Studio = (() => {
   }
   /** full-quality 16D render: server does cuts/speed/tone, then the binaural room is rendered here */
   async function render3D(segs, label) {
-    const r = await api.preview({ ...renderOpts(), segments: segs });
+    const r = await api.preview({ ...renderOpts(), segments: segs, format: 'wav' });   // lossless in-between step
     const ab = await (await fetch(r.url)).arrayBuffer();
     const buf = await new OfflineAudioContext(2, 1, 44100).decodeAudioData(ab);
     const parts = partsIntervals();
@@ -698,9 +702,36 @@ const Studio = (() => {
       if (k === 'resetAll') return confirmModal('Start over?', 'All cuts and speed changes will be removed.', 'Start over').then(ok => ok && op('resetAll'));
       if (k === 'save') return save();
     });
-    q('speed').addEventListener('input', e => {
-      const v = +e.target.value; q('speedVal').textContent = v.toFixed(2) + '×';
-      const box = e.target.closest('.speed-box'); box.firstElementChild.outerHTML = icon(v < 1 ? 'turtle' : v > 1 ? 'rabbit' : 'disc');
+    const setSpeed = (v, fromSlider) => {
+      st.speedV = v;
+      if (!fromSlider) q('speed').value = Math.min(1.5, Math.max(.5, v));
+      if (document.activeElement !== q('speedVal') || fromSlider) q('speedVal').value = +v.toFixed(3) + '';
+      const box = q('speed').closest('.speed-box'); box.firstElementChild.outerHTML = icon(v < 1 ? 'turtle' : v > 1 ? 'rabbit' : 'disc');
+    };
+    q('speed').addEventListener('input', e => setSpeed(+e.target.value, true));
+    /** accepts 0.83, .83, 83%, 1.07x, 1,07 — any speed from 0.25× to 3× */
+    const parseSpeed = str => {
+      let t = String(str).trim().toLowerCase().replace(',', '.').replace(/[x×\s]/g, '');
+      const pct = t.endsWith('%'); if (pct) t = t.slice(0, -1);
+      let v = parseFloat(t); if (!isFinite(v)) return NaN;
+      if (pct || v > 3.5) v /= 100;  // "83" is clearly meant as 83 %
+      return Math.round(v * 1000) / 1000;
+    };
+    const commitSpeed = () => {
+      const v = parseSpeed(q('speedVal').value);
+      if (!(v >= .25 && v <= 3)) { toast('Speed must be between 0.25× and 3× (e.g. 0.83 or 83%)', { error: true }); q('speedVal').value = +st.speedV.toFixed(3) + ''; return false; }
+      setSpeed(v); q('speedVal').value = +v.toFixed(3) + ''; return true;
+    };
+    q('speedVal').addEventListener('change', commitSpeed);
+    q('speedVal').addEventListener('focus', e => e.target.select());
+    q('speedVal').addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); if (commitSpeed()) op('speed'); }
+      else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        const step = (e.shiftKey ? .1 : .01) * (e.key === 'ArrowUp' ? 1 : -1);
+        const v = Math.min(3, Math.max(.25, Math.round(((parseSpeed(e.target.value) || st.speedV) + step) * 1000) / 1000));
+        setSpeed(v); e.target.value = +v.toFixed(3) + '';
+      } else if (e.key === 'Escape') { e.target.value = +st.speedV.toFixed(3) + ''; e.target.blur(); }
     });
     const selInput = (k) => q(k).addEventListener('change', () => {
       const a = parseTime(q('selA').value), b = parseTime(q('selB').value);

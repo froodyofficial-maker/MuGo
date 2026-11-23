@@ -20,12 +20,41 @@ const Spatial = (() => {
 
   const ROOMS = {
     none:      null,
-    small:     { label: 'Small room',     w: 4.5, h: 2.6, d: 4,  refl: .62, damp: 7000, tail: .7,  pre: .010, tailGain: .55 },
-    studio:    { label: 'Empty studio',   w: 7,   h: 3.4, d: 6,  refl: .68, damp: 6200, tail: 1.3, pre: .018, tailGain: .7 },
-    hall:      { label: 'Big empty hall', w: 18,  h: 8,   d: 24, refl: .74, damp: 5200, tail: 2.9, pre: .038, tailGain: .9 },
-    cathedral: { label: 'Cathedral',      w: 30,  h: 18,  d: 45, refl: .8,  damp: 4300, tail: 5.6, pre: .065, tailGain: 1.05 },
+    small:     { label: 'Small room',     w: 4.5, h: 2.6, d: 4,  refl: .62, damp: 9500, tail: .7,  pre: .010, tailGain: .55 },
+    studio:    { label: 'Empty studio',   w: 7,   h: 3.4, d: 6,  refl: .68, damp: 8500, tail: 1.3, pre: .018, tailGain: .7 },
+    hall:      { label: 'Big empty hall', w: 18,  h: 8,   d: 24, refl: .74, damp: 7200, tail: 2.9, pre: .038, tailGain: .9 },
+    cathedral: { label: 'Cathedral',      w: 30,  h: 18,  d: 45, refl: .8,  damp: 6000, tail: 5.6, pre: .065, tailGain: 1.05 },
   };
   const EAR_H = 1.2;  // ears are 1.2 m above the floor
+  /* The room adds energy above the bass split, so after loudness matching the bass would sit
+     lower. Measured shortfall (dB) at room amount 0 / 35 / 70 / 100 %, given back to the bass. */
+  const ROOM_BASS = { small: [0, 1.1, 2.5, 3.5], studio: [0, .9, 2.5, 3.5], hall: [0, 1, 2.9, 4.7], cathedral: [0, 1.4, 3.9, 6.1] };
+  function roomBassDb(room, amt) {
+    const t = ROOM_BASS[room]; if (!t) return 0;
+    const xs = [0, .35, .7, 1], a = Math.max(0, Math.min(1, amt));
+    for (let i = 1; i < 4; i++) if (a <= xs[i]) return t[i - 1] + (t[i] - t[i - 1]) * (a - xs[i - 1]) / (xs[i] - xs[i - 1]);
+    return t[3];
+  }
+  /* The head model, averaged over all directions, darkens everything above 1 kHz by 4–8 dB
+     (measured). Pro binaural tools undo that "diffuse-field" colouring so the music keeps its
+     tone; this EQ was fitted to the measurement (residual within about ±1 dB). */
+  const HRTF_EQ = [['peaking', 180, -1.6, .8], ['highshelf', 1200, 4, 0], ['peaking', 5800, -1.2, 1.4], ['peaking', 8400, 5.4, 2.2], ['highshelf', 12000, 1.6, 0]];
+  /* The HRTF panner delays its output (≈301 samples in Chromium). Everything that bypasses it
+     (centred bass, original mix) is delayed by the same amount so nothing smears or cancels. */
+  let LATENCY = 301;
+  const latencyReady = (async () => {
+    try {
+      const sr = 44100, c = new OfflineAudioContext(2, 4096, sr), b = c.createBuffer(1, 4096, sr);
+      b.getChannelData(0)[64] = 1;
+      const src = c.createBufferSource(); src.buffer = b;
+      const p = c.createPanner(); p.panningModel = 'HRTF'; p.positionZ.value = -1;
+      src.connect(p).connect(c.destination); src.start();
+      const L = (await c.startRendering()).getChannelData(0);
+      let pk = 0, pi = 64; for (let i = 0; i < L.length; i++) if (Math.abs(L[i]) > pk) { pk = Math.abs(L[i]); pi = i; }
+      if (pi - 64 >= 0 && pi - 64 < 2048) LATENCY = pi - 64;
+    } catch {}
+    return LATENCY;
+  })();
 
   const DEFAULTS = {
     engine: 'binaural', motion: 'circle', dir: 1, period: 8, distance: 1.6, breath: .3,
@@ -67,7 +96,7 @@ const Spatial = (() => {
   const len = p => Math.hypot(p[0], p[1], p[2]);
   /** sideways offset of the L/R "speakers" around the moving point (stereo width) */
   function spread(p, s, side) {
-    const d = Math.max(.3, Math.hypot(p[0], p[2])), az = Math.atan2(p[0], -p[2]) + side * s.width * .6;
+    const d = Math.max(.3, Math.hypot(p[0], p[2])), az = Math.atan2(p[0], -p[2]) + side * (.35 + s.width * .9);
     return [d * Math.sin(az), p[1], -d * Math.cos(az)];
   }
 
@@ -106,22 +135,36 @@ const Spatial = (() => {
    */
   function build(ctx, s) {
     const g = { ctx, s, input: ctx.createGain(), output: ctx.createGain() };
-    const bq = (type, f, q = Math.SQRT1_2) => { const b = ctx.createBiquadFilter(); b.type = type; b.frequency.value = f; b.Q.value = q; return b; };
+    // NB: for Web Audio lowpass/highpass, Q is a resonance in dB. A Butterworth (flat) response is
+    // −3.0103 dB, not 0.707. Two of them in a row = a Linkwitz-Riley crossover that sums flat.
+    const bq = (type, f, q = -3.0103) => { const b = ctx.createBiquadFilter(); b.type = type; b.frequency.value = f; b.Q.value = q; return b; };
     let hi = g.input;
     if (s.keepBass) {  // Linkwitz-Riley style split: bass stays centred, the rest moves
       const l1 = bq('lowpass', 120), l2 = bq('lowpass', 120), h1 = bq('highpass', 120), h2 = bq('highpass', 120);
       g.input.connect(l1).connect(l2);
       const bassMono = ctx.createGain(); bassMono.channelCount = 1; bassMono.channelCountMode = 'explicit';
-      l2.connect(bassMono).connect(g.output);
+      const align = ctx.createDelay(1); align.delayTime.value = LATENCY / ctx.sampleRate;  // line up with the head model
+      g.bassGain = ctx.createGain(); g.bassGain.gain.value = 1 / Math.max(1, s.distance)    // same distance law as the moving part
+        * Math.pow(10, roomBassDb(s.room, s.roomAmt) / 20);                                // and the room's extra energy
+      l2.connect(bassMono).connect(align).connect(g.bassGain).connect(g.output);
       g.input.connect(h1).connect(h2); hi = h2;
     }
-    const split = ctx.createChannelSplitter(2); hi.connect(split);
-    const mono = ctx.createGain(); mono.channelCount = 1; mono.channelCountMode = 'explicit'; mono.channelInterpretation = 'speakers';
-    hi.connect(mono);
-    // direct sound: the left and right channels as two close sources (keeps some stereo width)
-    g.direct = [0, 1].map(ch => {
-      const p = panner(ctx), gain = ctx.createGain();
-      split.connect(gain, ch); gain.connect(p).connect(g.output);
+    const mkMono = () => { const m = ctx.createGain(); m.channelCount = 1; m.channelCountMode = 'explicit'; m.channelInterpretation = 'speakers'; return m; };
+    const dryMono = mkMono(); hi.connect(dryMono);           // feeds the room tail (not head-modelled)
+    let eq = hi;                                              // tone correction for everything that goes through the head model
+    for (const [type, f, gain, q] of HRTF_EQ) { const b = ctx.createBiquadFilter(); b.type = type; b.frequency.value = f; b.gain.value = gain; if (q) b.Q.value = q; eq.connect(b); eq = b; }
+    const split = ctx.createChannelSplitter(2); eq.connect(split);
+    const mono = mkMono(); eq.connect(mono);
+    // direct sound, mid/side: the shared middle of the mix is ONE source (so it isn't summed twice and
+    // comb-filtered), the stereo difference rides on two spread sources with opposite polarity (width)
+    const midP = panner(ctx); mono.connect(midP).connect(g.output);
+    const side = ctx.createGain(); side.channelCount = 1; side.channelCountMode = 'explicit';
+    const sl = ctx.createGain(), sr = ctx.createGain(); sl.gain.value = .5; sr.gain.value = -.5;
+    split.connect(sl, 0); split.connect(sr, 1); sl.connect(side); sr.connect(side);
+    g.direct = [midP];
+    g.sides = [1, -1].map(sign => {
+      const p = panner(ctx), gn = ctx.createGain(); gn.gain.value = sign * Math.min(1, s.width * 1.6);
+      side.connect(gn).connect(p).connect(g.output);
       return p;
     });
     g.room = ROOMS[s.room];
@@ -130,26 +173,37 @@ const Spatial = (() => {
       const amt = s.roomAmt;
       for (let k = 0; k < 6; k++) {
         const dl = ctx.createDelay(1), lp = bq('lowpass', g.room.damp * (k === 2 ? .7 : 1)), gain = ctx.createGain(), p = panner(ctx);
-        gain.gain.value = g.room.refl * Math.sqrt(amt) * 1.15;
+        // the floor bounce (k = 2) arrives only ~4 ms late and would notch the low-mids (~130 Hz); treat the floor as rugged
+        gain.gain.value = g.room.refl * Math.sqrt(amt) * 1.15 * (k === 2 ? .45 : 1);
         mono.connect(dl).connect(lp).connect(gain).connect(p).connect(g.output);
         g.refl.push({ dl, p });
       }
-      const pre = ctx.createDelay(1), hp = bq('highpass', 150), conv = ctx.createConvolver(), tg = ctx.createGain();
-      pre.delayTime.value = g.room.pre + .015;
+      const pre = ctx.createDelay(1), hp = bq('highpass', 120), conv = ctx.createConvolver(), tg = ctx.createGain();
+      pre.delayTime.value = g.room.pre + .015 + LATENCY / ctx.sampleRate;
       conv.normalize = false; conv.buffer = tailIR(ctx, g.room);
       tg.gain.value = g.room.tailGain * amt * .62;
-      mono.connect(pre).connect(hp).connect(conv).connect(tg).connect(g.output);
+      dryMono.connect(pre).connect(hp).connect(conv).connect(tg).connect(g.output);
     }
     return g;
   }
   /** positions of every source at output time t */
+  /** Echo delays averaged over a lap. Keeping them fixed (instead of following the moving
+      source) avoids a pitch warble / chorus on the reflections; directions still move. */
+  function echoDelays(g) {
+    const s = g.s, key = [s.motion, s.period, s.distance, s.breath, s.height, s.room].join();
+    if (g._delKey === key) return g._delays;
+    const N = 48, sum = new Array(6).fill(0);
+    for (let i = 0; i < N; i++) {
+      const p = position(s, i / N * s.period * 2.2), dd = len(p);
+      images(g.room, p).forEach((im, k) => sum[k] += Math.min(.95, Math.max(0, (len(im) - dd) / C)));
+    }
+    g._delKey = key; g._delays = sum.map(v => v / N);
+    return g._delays;
+  }
   function frameAt(g, t) {
     const s = g.s, p = position(s, t);
-    const out = { direct: [spread(p, s, -1), spread(p, s, 1)], refl: [], delays: [] };
-    if (g.room) {
-      const dDirect = len(p);
-      for (const im of images(g.room, p)) { out.refl.push(im); out.delays.push(Math.min(.95, Math.max(0, (len(im) - dDirect) / C))); }
-    }
+    const out = { direct: [p], sides: [spread(p, s, -1), spread(p, s, 1)], refl: [], delays: [] };
+    if (g.room) { out.refl = images(g.room, p); out.delays = echoDelays(g); }
     return out;
   }
   /** live: glide everything to the position for time t */
@@ -157,6 +211,7 @@ const Spatial = (() => {
     const now = g.ctx.currentTime, f = frameAt(g, t), set = (prm, v) => prm.setTargetAtTime(v, now, .03);
     const pos = (pn, [x, y, z]) => { set(pn.positionX, x); set(pn.positionY, y); set(pn.positionZ, z); };
     g.direct.forEach((pn, i) => pos(pn, f.direct[i]));
+    g.sides.forEach((pn, i) => pos(pn, f.sides[i]));
     g.refl.forEach((r, i) => { pos(r.p, f.refl[i]); set(r.dl.delayTime, f.delays[i]); });
   }
   /** offline: write the whole motion as automation curves (100 points per second) */
@@ -165,6 +220,7 @@ const Spatial = (() => {
     for (let i = 0; i < N; i++) frames.push(frameAt(g, i / 100));
     const curve = (prm, fn) => { const a = new Float32Array(N); for (let i = 0; i < N; i++) a[i] = fn(frames[i]); prm.setValueCurveAtTime(a, 0, (N - 1) / 100 || .01); };
     g.direct.forEach((pn, k) => { ['positionX', 'positionY', 'positionZ'].forEach((ax, j) => curve(pn[ax], f => f.direct[k][j])); });
+    g.sides.forEach((pn, k) => { ['positionX', 'positionY', 'positionZ'].forEach((ax, j) => curve(pn[ax], f => f.sides[k][j])); });
     g.refl.forEach((r, k) => {
       ['positionX', 'positionY', 'positionZ'].forEach((ax, j) => curve(r.p[ax], f => f.refl[k][j]));
       curve(r.dl.delayTime, f => f.delays[k]);
@@ -177,6 +233,7 @@ const Spatial = (() => {
    * (for "marked parts"). Loudness is matched to the original and peaks kept below 0 dBFS.
    */
   async function renderOffline(buf, s, gate, onProgress) {
+    await latencyReady;
     const sr = buf.sampleRate, n = buf.length, dur = n / sr;
     const tailPad = (ROOMS[s.room]?.tail || 0) + .1;
     const ctx = new OfflineAudioContext(2, n + Math.floor(tailPad * sr), sr);
@@ -192,16 +249,17 @@ const Spatial = (() => {
     }
     const wet = await ctx.startRendering();
     onProgress?.(1);
+    const lat = LATENCY;  // the effect comes out this many samples late; read it early so it lines up
     // loudness-match the effect to the original, mix by gate, then keep peaks under 0 dBFS
     const rms = (ab, len) => { let e = 0, c = 0; for (let ch = 0; ch < 2; ch++) { const d = ab.getChannelData(Math.min(ch, ab.numberOfChannels - 1)); for (let i = 0; i < len; i += 4) { e += d[i] * d[i]; c++; } } return Math.sqrt(e / Math.max(1, c)); };
-    const k = rms(buf, n) / Math.max(1e-9, rms(wet, n));
+    const k = rms(buf, n) / Math.max(1e-9, rms(wet, n + LATENCY));
     const out = new AudioBuffer({ numberOfChannels: 2, length: n, sampleRate: sr });
     let peak = 0;
     for (let ch = 0; ch < 2; ch++) {
       const o = out.getChannelData(ch), w = wet.getChannelData(ch), d = buf.getChannelData(Math.min(ch, buf.numberOfChannels - 1));
       for (let i = 0; i < n; i++) {
         const gt = gate ? gate(i / sr) : 1;
-        const v = gt * k * w[i] + (1 - gt) * d[i];
+        const v = gt * k * (w[i + lat] || 0) + (1 - gt) * d[i];
         o[i] = v; const a = Math.abs(v); if (a > peak) peak = a;
       }
     }
@@ -209,20 +267,17 @@ const Spatial = (() => {
     return out;
   }
 
-  /** 16-bit PCM WAV for upload */
+  /** 32-bit float WAV for upload (lossless — the only lossy step left is the final encode) */
   function encodeWav(ab) {
-    const ch = 2, sr = ab.sampleRate, n = ab.length, bytes = 44 + n * ch * 2;
+    const ch = 2, sr = ab.sampleRate, n = ab.length, bytes = 44 + n * ch * 4;
     const dv = new DataView(new ArrayBuffer(bytes));
     const str = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
     str(0, 'RIFF'); dv.setUint32(4, bytes - 8, true); str(8, 'WAVE'); str(12, 'fmt ');
-    dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, ch, true); dv.setUint32(24, sr, true);
-    dv.setUint32(28, sr * ch * 2, true); dv.setUint16(32, ch * 2, true); dv.setUint16(34, 16, true); str(36, 'data'); dv.setUint32(40, n * ch * 2, true);
+    dv.setUint32(16, 16, true); dv.setUint16(20, 3, true); dv.setUint16(22, ch, true); dv.setUint32(24, sr, true);   // format 3 = IEEE float
+    dv.setUint32(28, sr * ch * 4, true); dv.setUint16(32, ch * 4, true); dv.setUint16(34, 32, true); str(36, 'data'); dv.setUint32(40, n * ch * 4, true);
     const L = ab.getChannelData(0), R = ab.getChannelData(1);
     let o = 44;
-    for (let i = 0; i < n; i++) {
-      const l = Math.max(-1, Math.min(1, L[i])), r = Math.max(-1, Math.min(1, R[i]));
-      dv.setInt16(o, l < 0 ? l * 0x8000 : l * 0x7fff, true); dv.setInt16(o + 2, r < 0 ? r * 0x8000 : r * 0x7fff, true); o += 4;
-    }
+    for (let i = 0; i < n; i++) { dv.setFloat32(o, L[i], true); dv.setFloat32(o + 4, R[i], true); o += 8; }
     return new Blob([dv], { type: 'audio/wav' });
   }
 
@@ -272,5 +327,5 @@ const Spatial = (() => {
     x.fillText('FRONT', cx, 12); x.fillText('BACK', cx, H - 5);
   }
 
-  return { ROOMS, DEFAULTS, position, build, place, renderOffline, encodeWav, makeMatcher, drawRadar };
+  return { ROOMS, DEFAULTS, position, build, place, renderOffline, encodeWav, makeMatcher, drawRadar, get latency() { return LATENCY; } };
 })();

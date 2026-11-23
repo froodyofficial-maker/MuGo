@@ -29,7 +29,7 @@ Double-click it, and MuGo opens. That's it: ffmpeg and the YouTube downloader ar
 - **Hide from Home:** right-click a song or a playlist (in the sidebar or on Home) → *Hide from Home*. Songs stay in your Library (with an 👁 tag) and playlists stay in the sidebar, but they no longer appear on the Home page. *Show on Home* undoes it.
 - **Custom covers:** right-click a song → *Change cover image…*, or drop an image file onto any song. *Restore original cover* brings the YouTube art back.
 - **Studio (music editor):**
-  - Drag on the waveform to select a part, then **Cut out**, **Keep only this** (trim) or **change its speed** (0.5×–1.5×).
+  - Drag on the waveform to select a part, then **Cut out**, **Keep only this** (trim) or **change its speed**. Use the slider (0.5×–1.5×), or type any speed from 0.25× to 3× (`0.83`, `83%` or `1.07x`; Enter applies, ↑/↓ nudge by 0.01).
   - **Deeper** (default) works like slowing a record: pitch and tone drop with the speed, through a high-precision soxr resampler. That's the classic "slowed" sound.
   - **Keep pitch** changes only the tempo, using the studio-grade [Rubber Band](https://breakfastquay.com/rubberband/) time-stretch engine.
   - **Extra depth** shifts the whole song down (or up) by semitones without changing speed. **Warm, heavy tone** boosts the bass and softens the highs.
@@ -39,7 +39,7 @@ Double-click it, and MuGo opens. That's it: ffmpeg and the YouTube downloader ar
     - **Speed, distance, breathing** (drifting closer and further away), **height** and **stereo width**
     - **Room:** none, small room, empty room, big empty hall or cathedral, plus a room-amount slider
     - **Keep bass centred** on or off, and a **live radar** showing where the music is
-    - Apply it to the whole song or only to parts marked with **8D this part**. The live preview uses the same engine as the saved file. **Classic 8D** (simple left/right circling) is still available.
+    - Apply it to the whole song or only to parts marked with **8D this part**. The live preview uses the same engine as the saved file. The engine is tuned to keep the original sound quality: it corrects the head model's tone, keeps the bass in sync, and the audio is only compressed once, at the very end. **Classic 8D** (simple left/right circling) is still available.
   - **Hi-Fi preview** renders the edit with the real engine so you hear exactly what will be saved. The quick preview is instant but only approximates the sound.
   - Set fade in/out, undo/redo, zoom (`Ctrl`+scroll) and preview the edit live before saving.
   - **Save as new song** renders it with ffmpeg into your library. The original is kept.

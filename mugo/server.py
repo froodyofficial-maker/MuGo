@@ -535,9 +535,10 @@ def eight_d_lines(inp: str, out: str, period: float, parts) -> list[str]:
 
 def run_render(src_path: Path, segments, opts: dict, out: Path) -> float:
     graph, total = build_filter(segments, opts)
+    codec = ["-c:a", "pcm_f32le"] if out.suffix == ".wav" else ["-c:a", "aac", "-b:a", "256k"]
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(src_path),
-        "-filter_complex", graph, "-map", "[out]", "-c:a", "aac", "-b:a", "256k", "-vn", str(out),
+        "-filter_complex", graph, "-map", "[out]", *codec, "-vn", str(out),
     ]
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # no flashing console on Windows
     r = subprocess.run(cmd, capture_output=True, text=True, creationflags=flags)
@@ -805,6 +806,28 @@ def edit():
     return jsonify(song)
 
 
+def wav_duration(path: Path) -> float:
+    """Length of a PCM / float WAV (Python's wave module can't read float WAVs)."""
+    import struct
+    with open(path, "rb") as fh:
+        head = fh.read(12)
+        if head[:4] != b"RIFF" or head[8:12] != b"WAVE":
+            raise ValueError("not a WAV file")
+        rate = block = 0
+        while True:
+            chunk = fh.read(8)
+            if len(chunk) < 8:
+                raise ValueError("WAV has no audio data")
+            cid, size = chunk[:4], struct.unpack("<I", chunk[4:])[0]
+            if cid == b"fmt ":
+                fmt = fh.read(size)
+                rate, block = struct.unpack("<I", fmt[4:8])[0], struct.unpack("<H", fmt[12:14])[0]
+            elif cid == b"data":
+                return size / (rate * block) if rate and block else 0.0
+            else:
+                fh.seek(size + (size & 1), 1)
+
+
 @app.post("/api/edit/upload")
 def edit_upload():
     """Save an edit that was finished in the browser (16D binaural render) as a new song."""
@@ -818,9 +841,7 @@ def edit_upload():
     f.save(tmp)
     out = AUDIO_DIR / f"{new_id}.m4a"
     try:
-        import wave
-        with wave.open(str(tmp)) as w:
-            duration = w.getnframes() / w.getframerate()
+        duration = wav_duration(tmp)
         r = subprocess.run(
             ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(tmp),
              "-c:a", "aac", "-b:a", "256k", "-vn", str(out)],
@@ -871,17 +892,20 @@ def preview():
         return jsonify({"error": "Nothing left to play — every part was cut."}), 400
     cache = DATA_DIR / "cache"
     cache.mkdir(exist_ok=True)
+    # "wav" = lossless 32-bit float, used as the in-between step for the 16D stage in the browser
+    ext = "wav" if body.get("format") == "wav" else "m4a"
     with preview_lock:
         try:
-            total = run_render(AUDIO_DIR / src["file"], segs, edit_opts(body), cache / "preview.m4a")
+            total = run_render(AUDIO_DIR / src["file"], segs, edit_opts(body), cache / f"preview.{ext}")
         except Exception as e:
             return jsonify({"error": f"Preview failed: {e}"}), 500
-    return jsonify({"url": f"/media/preview?v={int(now() * 1000)}", "duration": total})
+    return jsonify({"url": f"/media/preview?fmt={ext}&v={int(now() * 1000)}", "duration": total})
 
 
 @app.get("/media/preview")
 def preview_file():
-    path = DATA_DIR / "cache" / "preview.m4a"
+    ext = "wav" if request.args.get("fmt") == "wav" else "m4a"
+    path = DATA_DIR / "cache" / f"preview.{ext}"
     if not path.exists():
         abort(404)
     return send_file(path, conditional=True, max_age=0)
