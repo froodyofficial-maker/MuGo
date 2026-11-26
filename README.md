@@ -34,7 +34,15 @@ Double-click it, and MuGo opens. That's it: ffmpeg and the YouTube downloader ar
   - **Keep pitch** changes only the tempo, using the studio-grade [Rubber Band](https://breakfastquay.com/rubberband/) time-stretch engine.
   - **Extra depth** shifts the whole song down (or up) by semitones without changing speed. **Warm, heavy tone** boosts the bass and softens the highs.
   - **Convolution reverb** (Room / Hall / Dreamy) with an **amount** slider, for the slowed + reverb sound: from a subtle space up to an echo as loud as the song. It has pre-delay and a low-cut so the song stays clear, and you hear it live in the quick preview. A limiter keeps everything from clipping, and edits are saved as 256 kbps AAC.
-  - **🎧 3D / 8D audio (16D binaural engine):** the music plays at a moving point around you inside a virtual room, the way "16D" tracks are made. It uses a binaural head model, so you get real time and tone differences between your ears, front/back and height cues, and the far ear is softened by your head. Echoes from all six walls/floor/ceiling each arrive from their own direction, plus the room's diffuse tail, and the bass stays centred.
+  - **🎛 Effects rack** with one-click **presets**: Nightcore, Slowed + reverb, Bass boosted, Lo-fi, Vaporwave, Karaoke, Old radio, Concert hall, Echo chamber, 16D.
+    - **Tone:** 5-band EQ (sub bass, low mids, mids, presence, air).
+    - **Character:** drive (saturation), bitcrush, lo-fi tape (wobble + vinyl crackle), radio/phone, vocal remover (karaoke).
+    - **Modulation:** chorus, flanger, phaser, tremolo, vibrato (with speed).
+    - **Echo & width:** echo (amount, time, repeats), stereo width from mono to extra wide.
+    - **Volume & punch:** compressor, volume, loudness target (*match original*, streaming −14, loud −9 or max −7 LUFS).
+    - Effects have automatic gain, so they change the *sound* and not the *volume*. Saved songs keep the original's loudness unless you choose a target.
+  - **Parts of the song:** select a part, then **Reverse** it, **Mute** it, or **Repeat** it ×2/×3/×4.
+ (16D binaural engine):** the music plays at a moving point around you inside a virtual room, the way "16D" tracks are made. It uses a binaural head model, so you get real time and tone differences between your ears, front/back and height cues, and the far ear is softened by your head. Echoes from all six walls/floor/ceiling each arrive from their own direction, plus the room's diffuse tail, and the bass stays centred.
     - **Movement:** circle, figure 8, ping-pong, spiral or wander, clockwise or counter-clockwise
     - **Speed, distance, breathing** (drifting closer and further away), **height** and **stereo width**
     - **Room:** none, small room, empty room, big empty hall or cathedral, plus a room-amount slider

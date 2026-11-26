@@ -7,7 +7,7 @@
    ===================================================================== */
 const Studio = (() => {
   const EPS = 1e-3;
-  const COLORS = { cut: '251,113,133', slow: '96,165,250', fast: '251,191,36', d8: '192,132,252' };
+  const COLORS = { cut: '251,113,133', slow: '96,165,250', fast: '251,191,36', d8: '192,132,252', part: '45,212,191' };
   let st = null;          // editor state for the mounted song
   let root = null;        // view element
   const pa = new Audio(); // preview audio
@@ -29,15 +29,20 @@ const Studio = (() => {
         this.dry = c.createGain();
         this.delay = c.createDelay(1); this.hp = c.createBiquadFilter(); this.hp.type = 'highpass'; this.hp.frequency.value = 180;
         this.conv = c.createConvolver(); this.conv.normalize = false; this.wet = c.createGain(); this.wet.gain.value = 0;
-        src.connect(this.low).connect(this.mid).connect(this.high);
+        this.segGain = c.createGain();                         // mutes "muted" parts while previewing
+        src.connect(this.segGain).connect(this.low).connect(this.mid).connect(this.high);
+        // effects rack: [pre] runs before 3D/8D + reverb, [post] (punch, auto level, volume) after
+        this.chain = Effects.build(c); this.chain.update(st.fx);
+        this.high.connect(this.chain.pre.input);
+        const fxOut = this.chain.pre.output;
         // 8D stage (same recipe as the server): mono → front/behind/head-shadow paths → per-ear gains
         this.post = c.createGain();
         this.orig = c.createGain(); this.origDelay = c.createDelay(1);
-        this.high.connect(this.origDelay).connect(this.orig).connect(this.post);
+        fxOut.connect(this.origDelay).connect(this.orig).connect(this.post);
         const mono = c.createGain(); mono.channelCount = 1; mono.channelCountMode = 'explicit'; mono.channelInterpretation = 'speakers';
         const lp = f => { const b = c.createBiquadFilter(); b.type = 'lowpass'; b.frequency.value = f; return b; };
         const back = lp(3200), back2 = lp(3200), shadow = lp(1300);
-        this.high.connect(mono); mono.connect(back).connect(back2); mono.connect(shadow);
+        fxOut.connect(mono); mono.connect(back).connect(back2); mono.connect(shadow);
         const merger = c.createChannelMerger(2);
         this.ear = [0, 1].map(ch => {
           const g = { front: c.createGain(), back: c.createGain(), shadow: c.createGain() };
@@ -47,12 +52,15 @@ const Studio = (() => {
         });
         this.e8 = c.createGain(); this.e8.gain.value = 0; merger.connect(this.e8).connect(this.post);
         // 16D: binaural spatial graph (rebuilt when the room / bass settings change)
-        this.spIn = c.createGain(); this.high.connect(this.spIn);
+        this.spIn = c.createGain(); fxOut.connect(this.spIn);
         this.spMake = c.createGain(); this.spGate = c.createGain(); this.spGate.gain.value = 0;
         this.spMake.connect(this.spGate).connect(this.post);
         this.rebuildSpatial();
-        this.post.connect(this.dry).connect(c.destination);
-        this.post.connect(this.delay).connect(this.hp).connect(this.conv).connect(this.wet).connect(c.destination);
+        this.post.connect(this.dry).connect(this.chain.post.input);
+        this.post.connect(this.delay).connect(this.hp).connect(this.conv).connect(this.wet).connect(this.chain.post.input);
+        this.chain.post.output.connect(c.destination);
+        // auto level: like the saved file, effects change the sound but not the overall volume
+        this.levelMatch = Spatial.makeMatcher(c, src, null, this.chain.level);
         this.en = 0;
         this.update();
       } catch (e) { console.warn('live preview effects unavailable', e); this.ctx = null; }
@@ -105,6 +113,8 @@ const Studio = (() => {
       if (!this.ctx || !st || !this.ear) return;
       const now = this.ctx.currentTime, set = (p, v) => p.setTargetAtTime(v, now, .015);
       const seg = segAt(t);
+      set(this.segGain.gain, seg && seg.mute ? 0 : 1);
+      if (seg && !seg.mute) this.levelMatch();
       const target = st.eightD === 'all' ? 1 : st.eightD === 'parts' && seg && seg.d8 ? 1 : 0;
       this.en += (target - this.en) * .06;                    // smooth ~0.5 s crossfade, like the render
       const en = this.en < .002 ? 0 : this.en;
@@ -135,7 +145,10 @@ const Studio = (() => {
     let o = 0;
     for (const s of st.segs) {
       if (s.start >= t) break;
-      if (!s.cut) o += (Math.min(t, s.end) - s.start) / s.speed;
+      if (s.cut) continue;
+      const len = (s.end - s.start) / s.speed;
+      if (t >= s.end) o += len * (s.rep || 1);                   // whole part, all repeats
+      else o += ((st.loopSeg === s ? (s.rep || 1) - 1 - st.loopLeft : 0) * len) + (t - s.start) / s.speed;
     }
     return o;
   }
@@ -152,7 +165,7 @@ const Studio = (() => {
     stop();
     st = {
       id, song, dur: song.duration || 0, peaks: null, segs: [], sel: null, hist: [], fut: [],
-      zoom: 1, speedV: .8, eightD: 'off', eightDPeriod: 8, sp: { ...Spatial.DEFAULTS, room: 'studio', roomAmt: .7, ...store.get('spatial', {}) }, pitch: store.get('studioPitch', 'vinyl'), semitones: 0, warm: false, reverb: '', reverbAmount: .7, fadeIn: 0, fadeOut: 0, playhead: 0, titleTouched: false, hover: null,
+      zoom: 1, speedV: .8, fx: Effects.fresh(), fxTab: 'tone', eightD: 'off', eightDPeriod: 8, sp: (() => { const v = { ...Spatial.DEFAULTS, room: 'studio', roomAmt: .7, ...store.get('spatial', {}) }; if (v.width === .35) v.width = .6; /* .35 was the old default: keep more of the stereo image */ return v; })(), pitch: store.get('studioPitch', 'vinyl'), semitones: 0, warm: false, reverb: '', reverbAmount: .7, fadeIn: 0, fadeOut: 0, playhead: 0, titleTouched: false, hover: null,
     };
     renderShell();
     load();
@@ -219,6 +232,9 @@ const Studio = (() => {
             <button class="btn keep" data-s="keep" title="K">${icon('crop')}<span>Keep only this</span></button>
             <button class="btn" data-s="playSel">${icon('play')}<span>Play selection</span></button>
             <button class="btn d8" data-s="d8" title="Make this part spin around your head (headphones)">${icon('headphones')}<span>8D this part</span></button>
+            <button class="btn part" data-s="rev" title="Play this part backwards">${icon('undo')}<span>Reverse</span></button>
+            <button class="btn part" data-s="mute" title="Silence this part">${icon('mute')}<span>Mute</span></button>
+            <button class="btn part" data-s="rep" title="Repeat this part (loop it)">${icon('repeat')}<span>Repeat</span></button>
             <button class="btn ghost" data-s="resetSel">${icon('refresh')}<span>Reset part</span></button>
           </div>
           <span class="sep"></span>
@@ -228,6 +244,7 @@ const Studio = (() => {
       </div>
 
 
+      ${fxPanelHTML()}
       <div class="panel sp-panel" data-s="spPanel">
         <div class="sp-head"><div><h4 style="margin:0">3D / 8D audio 🎧</h4><small>Put on headphones. The music moves around you inside a virtual room</small></div>
           <div class="seg-toggle" data-s="eightD"><button data-v="off">Off</button><button data-v="all">Whole song</button><button data-v="parts">Marked parts</button></div></div>
@@ -337,7 +354,7 @@ const Studio = (() => {
     const out = [];
     for (const s of st.segs) {
       const p = out[out.length - 1];
-      if (p && p.cut === s.cut && !!p.d8 === !!s.d8 && Math.abs(p.speed - s.speed) < 1e-6) p.end = s.end;
+      if (p && p.cut === s.cut && !!p.d8 === !!s.d8 && !!p.rev === !!s.rev && !!p.mute === !!s.mute && (p.rep || 1) === (s.rep || 1) && Math.abs(p.speed - s.speed) < 1e-6) p.end = s.end;
       else out.push({ ...s });
     }
     st.segs = out.filter(s => s.end - s.start > 0.005);
@@ -348,7 +365,17 @@ const Studio = (() => {
     const sel = st.sel && st.sel.b - st.sel.a > 0.01 ? st.sel : null;
     if (name === 'cut' && sel) { apply(sel.a, sel.b, s => s.cut = true); toast('Cut out ' + fmt(sel.b - sel.a)); }
     else if (name === 'keep' && sel) { apply(0, sel.a, s => s.cut = true); apply(sel.b, st.dur, s => s.cut = true); toast('Trimmed to selection'); }
-    else if (name === 'reset' && sel) apply(sel.a, sel.b, s => { s.cut = false; s.speed = 1; s.d8 = false; });
+    else if (name === 'reset' && sel) apply(sel.a, sel.b, s => { s.cut = false; s.speed = 1; s.d8 = false; s.rev = false; s.mute = false; s.rep = 1; });
+    else if ((name === 'rev' || name === 'mute') && sel) {
+      const inSel = st.segs.filter(s => s.end > sel.a + EPS && s.start < sel.b - EPS), on = !inSel.every(s => s[name]);
+      apply(sel.a, sel.b, s => s[name] = on);
+      toast(name === 'rev' ? (on ? 'Part reversed ⟲' : 'Part plays forward again') : (on ? 'Part muted' : 'Part unmuted'),
+            { sub: name === 'rev' && on ? 'The quick preview plays it forward. Use Hi-Fi preview to hear it reversed' : '' });
+    }
+    else if (name.startsWith('rep') && sel) {
+      const n = +name.slice(3); apply(sel.a, sel.b, s => s.rep = n);
+      toast(n > 1 ? `Part repeats ×${n}` : 'Part plays once');
+    }
     else if (name === 'd8' && sel) {
       const inSel = st.segs.filter(s => s.end > sel.a + EPS && s.start < sel.b - EPS);
       const turnOn = !inSel.every(s => s.d8);
@@ -369,7 +396,7 @@ const Studio = (() => {
   function undo() { if (!st.hist.length) return; st.fut.push(snap()); st.segs = JSON.parse(st.hist.pop()); update(); }
   function redo() { if (!st.fut.length) return; st.hist.push(snap()); st.segs = JSON.parse(st.fut.pop()); update(); }
   const kept = () => st.segs.filter(s => !s.cut);
-  const outLen = () => kept().reduce((a, s) => a + (s.end - s.start) / s.speed, 0);
+  const outLen = () => kept().reduce((a, s) => a + (s.end - s.start) / s.speed * (s.rep || 1), 0);
   const segAt = t => st.segs.find(s => t >= s.start - EPS && t < s.end) || st.segs[st.segs.length - 1];
 
   /* ---------------- UI updates ---------------- */
@@ -378,7 +405,7 @@ const Studio = (() => {
     draw(); ruler();
     const sel = st.sel;
     const has = !!(sel && sel.b - sel.a > 0.01);
-    ['cut', 'keep', 'playSel', 'resetSel', 'd8'].forEach(k => q(k).disabled = !has);
+    ['cut', 'keep', 'playSel', 'resetSel', 'd8', 'rev', 'mute', 'rep'].forEach(k => q(k).disabled = !has);
     if (document.activeElement !== q('selA')) q('selA').value = has ? fmtMs(sel.a) : '';
     if (document.activeElement !== q('selB')) q('selB').value = has ? fmtMs(sel.b) : '';
     q('selLen').textContent = has ? `(${fmtMs(sel.b - sel.a)})` : 'none — speed applies to whole song';
@@ -388,10 +415,11 @@ const Studio = (() => {
     const L = outLen();
     q('len').innerHTML = `${fmt(L)}<span style="font-size:14px;color:var(--muted);font-weight:600"> / ${fmt(st.dur)}</span>`;
     // edit list
-    const edits = st.segs.filter(s => s.cut || s.speed !== 1 || s.d8);
+    const edits = st.segs.filter(s => s.cut || s.speed !== 1 || s.d8 || s.rev || s.mute || (s.rep || 1) > 1);
     q('segList').innerHTML = edits.length ? edits.map(s => {
-      const c = s.cut ? COLORS.cut : s.speed < 1 ? COLORS.slow : s.speed > 1 ? COLORS.fast : COLORS.d8;
-      const lbl = s.cut ? 'Cut out' : [s.speed !== 1 ? (s.speed < 1 ? 'Slowed' : 'Sped up') + ` · ${spd(s.speed)}` : '', s.d8 ? '8D audio' : ''].filter(Boolean).join(' + ');
+      const c = s.cut ? COLORS.cut : s.speed < 1 ? COLORS.slow : s.speed > 1 ? COLORS.fast : s.d8 ? COLORS.d8 : COLORS.part;
+      const lbl = s.cut ? 'Cut out' : [s.speed !== 1 ? (s.speed < 1 ? 'Slowed' : 'Sped up') + ` · ${spd(s.speed)}` : '', s.rev ? 'Reversed' : '',
+        s.mute ? 'Muted' : '', (s.rep || 1) > 1 ? `Repeats ×${s.rep}` : '', s.d8 ? '8D audio' : ''].filter(Boolean).join(' + ');
       return `<div class="seg-row" data-seg="${s.start}|${s.end}"><span class="dot" style="background:rgb(${c})"></span><span class="lbl">${lbl}</span>
         <span style="color:var(--muted)">${fmtMs(s.start)} → ${fmtMs(s.end)}</span><button class="icon-btn" data-undo-seg="${s.start}|${s.end}" title="Reset this part">${icon('close')}</button></div>`;
     }).join('') : `<div style="color:var(--faint);padding:8px 2px;line-height:1.6">No edits yet. Select a part of the waveform, then cut it out, keep only it, or change its speed.</div>`;
@@ -436,6 +464,15 @@ const Studio = (() => {
       }
       x.fillStyle = `rgba(${c},.9)`; x.fillRect(X(s.start), 0, X(s.end) - X(s.start), 3);
       if (!s.cut) { x.font = '700 11px system-ui'; x.fillText(spd(s.speed), X(s.start) + 6, 17); }
+    }
+    // reversed / muted / repeated parts
+    for (const s of st.segs) {
+      if (s.cut || !(s.rev || s.mute || (s.rep || 1) > 1)) continue;
+      const a = X(s.start), wd = X(s.end) - a;
+      if (s.mute) { x.fillStyle = 'rgba(10,8,16,.55)'; x.fillRect(a, 0, wd, h); }
+      x.fillStyle = `rgba(${COLORS.part},.95)`; x.fillRect(a, 3, wd, 3);
+      const tags = [s.rev ? '⟲ reversed' : '', s.mute ? 'muted' : '', (s.rep || 1) > 1 ? `×${s.rep}` : ''].filter(Boolean).join(' · ');
+      if (wd > 30) { x.font = '800 11px system-ui'; x.fillStyle = `rgba(${COLORS.part},1)`; x.fillText(tags, a + 6, 32); }
     }
     // 8D parts: purple band along the bottom with a label
     for (const s of st.segs) {
@@ -489,7 +526,9 @@ const Studio = (() => {
     const on = spatialOn();
     return { source: st.id, pitch: st.pitch, semitones: st.semitones, warm: st.warm,
       reverb: on ? '' : st.reverb, reverbAmount: st.reverbAmount,
-      eightD: on ? 'off' : st.eightD, eightDPeriod: st.eightDPeriod, fadeIn: st.fadeIn, fadeOut: st.fadeOut };
+      eightD: on ? 'off' : st.eightD, eightDPeriod: st.eightDPeriod, fadeIn: st.fadeIn, fadeOut: st.fadeOut,
+      // in 16D mode loudness + volume are applied once, after the 3D stage (on upload)
+      fx: on ? { ...st.fx, loud: 'off', gain: 0 } : st.fx };
   }
   /** full-quality 16D render: server does cuts/speed/tone, then the binaural room is rendered here */
   async function render3D(segs, label) {
@@ -518,7 +557,7 @@ const Studio = (() => {
     if (!st?.peaks) return;
     if (hqPlaying()) return hqStop();
     stop(); if (!audio.paused) Player.pause();
-    const segs = kept().map(s => ({ start: +s.start.toFixed(3), end: +s.end.toFixed(3), speed: s.speed, d8: !!s.d8 }));
+    const segs = kept().map(s => ({ start: +s.start.toFixed(3), end: +s.end.toFixed(3), speed: s.speed, d8: !!s.d8, rev: !!s.rev, mute: !!s.mute, rep: s.rep || 1 }));
     if (!segs.length) return toast('Everything is cut — nothing to play', { error: true });
     const b = q('hifi'); b.disabled = true; b.innerHTML = `<span class="mini-bar indet" style="width:60px"><div></div></span><span>Rendering…</span>`;
     try {
@@ -558,7 +597,7 @@ const Studio = (() => {
     const s = segAt(t); if (s.cut) { const nx = st.segs.find(x => x.start >= s.end - EPS && !x.cut); if (!nx) return; t = nx.start; }
     st.until = until;
     pa.preservesPitch = pa.mozPreservesPitch = pa.webkitPreservesPitch = st.pitch === 'keep';
-    pa.currentTime = t; pa.playbackRate = segAt(t).speed;
+    pa.currentTime = t; pa.playbackRate = segAt(t).speed; st.loopSeg = null;
     fx.init();
     pa.play().catch(() => {});
     setPlayIcon(true);
@@ -576,7 +615,12 @@ const Studio = (() => {
       if (!nx) { stop(); st.playhead = st.dur; draw(); return; }
       pa.currentTime = t = nx.start;
     }
-    const sp = segAt(t).speed; if (Math.abs(pa.playbackRate - sp) > 1e-3) pa.playbackRate = sp;
+    // repeated parts: when the playhead leaves a part that still has repeats left, jump back to its start
+    let cur = segAt(t);
+    if (st.loopSeg && cur !== st.loopSeg && st.loopLeft > 0 && t >= st.loopSeg.end - EPS && t < st.loopSeg.end + .3) {
+      st.loopLeft--; pa.currentTime = t = st.loopSeg.start; cur = st.loopSeg;
+    } else if (cur !== st.loopSeg) { st.loopSeg = cur; st.loopLeft = (cur.rep || 1) - 1; }
+    const sp = cur.speed; if (Math.abs(pa.playbackRate - sp) > 1e-3) pa.playbackRate = sp;
     st.playhead = t;
     fx.frame(t);
     radar(true);
@@ -587,6 +631,94 @@ const Studio = (() => {
     raf = requestAnimationFrame(loop);
   }
   pa.addEventListener('ended', () => { stop(); if (st) { st.playhead = 0; draw(); } });
+
+  /* ---------------- effects panel ---------------- */
+  const FX_TABS = [['tone', 'Tone'], ['character', 'Character'], ['mod', 'Modulation'], ['space', 'Echo & width'], ['dyn', 'Volume & punch']];
+  const FX_IN_TAB = { tone: ['eq'], character: ['drive', 'crush', 'lofi', 'radio', 'vocals'], mod: ['chorus', 'flanger', 'phaser', 'trem', 'vib'],
+                      space: ['echo', 'width'], dyn: ['punch', 'gain', 'loud'] };
+  function fxPanelHTML() {
+    const sl = (key, label, sub, min, max, step, lo, hi) => `<div class="opt-row"><div><b>${label}</b><small>${sub}</small></div>
+      <div class="sp-slider fx-slider"><span class="sel-label">${lo}</span><input type="range" min="${min}" max="${max}" step="${step}" data-fx="${key}"><span class="sel-label">${hi}</span><b data-fxv="${key}"></b></div></div>`;
+    const eq = Effects.EQ_BANDS.map(([, , , name, hz], i) => `<div class="eq-band"><b data-fxv="eq.${i}"></b>
+      <input type="range" class="eq-v" min="-12" max="12" step="0.5" data-fx="eq.${i}"><span>${name}</span><small>${hz}</small></div>`).join('');
+    return `
+      <div class="panel fx-panel">
+        <div class="sp-head"><div><h4 style="margin:0">Effects</h4><small>Everything plays live in the preview · the volume stays matched to the original unless you change it</small></div>
+          <button class="btn ghost" data-s="fxReset">${icon('refresh')}<span>Reset effects</span></button></div>
+        <div class="fx-presets">${Effects.PRESETS.map(p => `<button class="chip" data-preset="${p.id}">${icon(p.icon)}<span>${p.label}</span></button>`).join('')}</div>
+        <div class="fx-tabs">${FX_TABS.map(([id, l]) => `<button data-fxtab="${id}">${l}<i class="dot"></i></button>`).join('')}</div>
+        <div data-fxsec="tone"><div class="eq-bank">${eq}</div>
+          <div class="kbd-hint" style="text-align:center">Drag up to boost, down to cut · double-click a slider to reset it</div></div>
+        <div data-fxsec="character">
+          ${sl('drive', 'Drive', 'Warm saturation, like an overdriven tube amp', 0, 100, 1, 'clean', 'dirty')}
+          ${sl('crush', 'Bitcrush', 'Retro low-resolution digital grit', 0, 100, 1, 'off', 'crunchy')}
+          ${sl('lofi', 'Lo-fi tape', 'Darker, thinner, wobbly, with vinyl crackle', 0, 100, 1, 'off', 'dusty')}
+          ${sl('radio', 'Radio / phone', 'Squeezed through a small speaker', 0, 100, 1, 'off', 'full')}
+          ${sl('vocals', 'Vocal remover', 'Karaoke: removes whatever sits in the centre of the mix (usually the vocals)', 0, 100, 1, 'off', 'gone')}
+        </div>
+        <div data-fxsec="mod">
+          ${sl('chorus', 'Chorus', 'Thick, shimmering, like several players at once', 0, 100, 1, 'off', 'lush')}
+          ${sl('flanger', 'Flanger', 'The classic jet-plane whoosh', 0, 100, 1, 'off', 'strong')}
+          ${sl('phaser', 'Phaser', 'Swirling, spacey sweep', 0, 100, 1, 'off', 'strong')}
+          ${sl('trem', 'Tremolo', 'Volume pulses', 0, 100, 1, 'off', 'deep')}
+          ${sl('tremRate', 'Tremolo speed', 'Pulses per second', 0.5, 16, 0.5, 'slow', 'fast')}
+          ${sl('vib', 'Vibrato', 'Pitch wobbles', 0, 100, 1, 'off', 'deep')}
+          ${sl('vibRate', 'Vibrato speed', 'Wobbles per second', 0.5, 12, 0.5, 'slow', 'fast')}
+        </div>
+        <div data-fxsec="space">
+          ${sl('echo', 'Echo', 'Repeats that bounce back', 0, 100, 1, 'off', 'loud')}
+          ${sl('echoTime', 'Echo time', 'Time between repeats (ms)', 40, 1500, 10, 'short', 'long')}
+          ${sl('echoFb', 'Echo repeats', 'How long the echoes keep going', 0, 90, 1, 'one', 'many')}
+          ${sl('width', 'Stereo width', '0% = mono, 100% = original, 200% = extra wide', 0, 200, 5, 'mono', 'wide')}
+          <div class="kbd-hint">Reverb and 3D / 8D audio have their own sections below.</div>
+        </div>
+        <div data-fxsec="dyn">
+          ${sl('punch', 'Punch', 'Compressor: louder, tighter and more in-your-face', 0, 100, 1, 'natural', 'punchy')}
+          ${sl('gain', 'Volume', 'Turn the whole song up or down (dB)', -12, 12, 0.5, 'quieter', 'louder')}
+          <div class="opt-row"><div><b>Loudness</b><small>Match the original song, or master it to a standard level (applied when saving / in Hi-Fi preview)</small></div>
+            <div class="seg-toggle" data-s="loud"><button data-v="off">Match original</button><button data-v="streaming">Streaming −14</button><button data-v="loud">Loud −9</button><button data-v="max">Max −7</button></div></div>
+        </div>
+      </div>`;
+  }
+  const FX_PCT = ['drive', 'crush', 'lofi', 'radio', 'vocals', 'chorus', 'flanger', 'phaser', 'trem', 'vib', 'echo', 'punch', 'echoFb', 'width'];
+  const fxGet = k => k.startsWith('eq.') ? st.fx.eq[+k.slice(3)] : st.fx[k];
+  const fxSet = (k, v) => { if (k.startsWith('eq.')) st.fx.eq[+k.slice(3)] = v; else st.fx[k] = v; };
+  const fxShow = (k, v) => k.startsWith('eq.') || k === 'gain' ? `${v > 0 ? '+' : ''}${v} dB` : k.endsWith('Rate') ? `${v} Hz` : k === 'echoTime' ? `${v} ms` : `${Math.round(v * 100)}%`;
+  function syncFx() {
+    if (!root?.querySelector('.fx-panel')) return;
+    root.querySelectorAll('[data-fx]').forEach(el => {
+      const k = el.dataset.fx, v = fxGet(k);
+      if (document.activeElement !== el) el.value = FX_PCT.includes(k) ? Math.round(v * 100) : v;
+      root.querySelector(`[data-fxv="${k}"]`).textContent = fxShow(k, v);
+    });
+    q('loud').querySelectorAll('button').forEach(x => x.classList.toggle('on', x.dataset.v === st.fx.loud));
+    const D = Effects.DEFAULTS, changed = k => k === 'eq' ? st.fx.eq.some(v => v) : st.fx[k] !== D[k];
+    root.querySelectorAll('[data-fxtab]').forEach(b => {
+      b.classList.toggle('on', b.dataset.fxtab === st.fxTab);
+      b.classList.toggle('active', FX_IN_TAB[b.dataset.fxtab].some(changed));
+    });
+    root.querySelectorAll('[data-fxsec]').forEach(sec => sec.hidden = sec.dataset.fxsec !== st.fxTab);
+    fx.chain?.update(st.fx);
+  }
+  function applyPreset(id) {
+    const p = Effects.PRESETS.find(x => x.id === id); if (!p) return;
+    const before = snap();
+    st.fx = { ...Effects.fresh(), ...(p.fx || {}), eq: [...(p.fx?.eq || [0, 0, 0, 0, 0])] };
+    if (p.speed) { st.segs.forEach(s => { if (!s.cut) s.speed = p.speed; }); commit(before); }
+    if (p.pitch) { st.pitch = p.pitch; q('pitch').querySelectorAll('button').forEach(x => x.classList.toggle('on', x.dataset.v === p.pitch)); }
+    if (p.reverb !== undefined) setReverb(p.reverb, p.reverbAmount);
+    if (p.warm !== undefined) { st.warm = p.warm; q('warm').querySelectorAll('button').forEach(x => x.classList.toggle('on', x.dataset.v === (p.warm ? '1' : '0'))); }
+    if (p.eightD) setEightD(p.eightD);
+    root.querySelectorAll('[data-preset]').forEach(b => b.classList.toggle('on', b.dataset.preset === id));
+    syncFx(); fx.update(); update();
+    toast(`Preset: ${p.label}`, { sub: 'Press Space to hear it · tweak anything you like' });
+  }
+  function setReverb(v, amt) {
+    st.reverb = v || ''; if (amt != null) st.reverbAmount = amt;
+    q('reverb').querySelectorAll('button').forEach(x => x.classList.toggle('on', x.dataset.v === st.reverb));
+    const row = q('amountRow'); row.style.opacity = st.reverb ? 1 : .4; row.style.pointerEvents = st.reverb ? '' : 'none';
+    q('revAmt').value = Math.round(st.reverbAmount * 100); q('revAmtVal').textContent = Math.round(st.reverbAmount * 100) + '%';
+  }
 
   const spatialOn = () => st.eightD !== 'off' && st.sp.engine === 'binaural';
   function setEightD(v) {
@@ -626,7 +758,7 @@ const Studio = (() => {
     const out = []; let o = 0;
     for (const s of st.segs) {
       if (s.cut) continue;
-      const len = (s.end - s.start) / s.speed;
+      const len = (s.end - s.start) / s.speed * (s.rep || 1);
       if (s.d8) { const last = out[out.length - 1]; if (last && Math.abs(last[1] - o) < 1e-3) last[1] = o + len; else out.push([o, o + len]); }
       o += len;
     }
@@ -683,7 +815,7 @@ const Studio = (() => {
       const b = e.target.closest('button[data-s]');
       const k = b?.dataset.s;
       const seg = e.target.closest('[data-undo-seg]');
-      if (seg) { const [a, bb] = seg.dataset.undoSeg.split('|').map(Number); const before = snap(); apply(a, bb, s => { s.cut = false; s.speed = 1; s.d8 = false; }); commit(before); return; }
+      if (seg) { const [a, bb] = seg.dataset.undoSeg.split('|').map(Number); const before = snap(); apply(a, bb, s => { s.cut = false; s.speed = 1; s.d8 = false; s.rev = false; s.mute = false; s.rep = 1; }); commit(before); return; }
       const row = e.target.closest('[data-seg]');
       if (row) { const [a, bb] = row.dataset.seg.split('|').map(Number); st.sel = { a, b: bb }; st.playhead = a; update(); return; }
       if (!k) return;
@@ -697,8 +829,12 @@ const Studio = (() => {
       if (k === 'keep') return op('keep');
       if (k === 'resetSel') return op('reset');
       if (k === 'd8') return op('d8');
+      if (k === 'rev') return op('rev');
+      if (k === 'mute') return op('mute');
+      if (k === 'rep') { const r = b.getBoundingClientRect(); return showMenu(r.left, r.bottom + 6, [2, 3, 4, 1].map(n => ({ icon: n > 1 ? 'repeat' : 'close', label: n > 1 ? `Repeat ×${n}` : 'Play once (no repeat)', action: () => op('rep' + n) }))); }
       if (k === 'applySpeed') return op('speed');
       if (k === 'playSel' && st.sel) return startPreview(st.sel.a, st.sel.b);
+      if (k === 'fxReset') { st.fx = Effects.fresh(); root.querySelectorAll('[data-preset]').forEach(b => b.classList.remove('on')); syncFx(); return toast('Effects reset'); }
       if (k === 'resetAll') return confirmModal('Start over?', 'All cuts and speed changes will be removed.', 'Start over').then(ok => ok && op('resetAll'));
       if (k === 'save') return save();
     });
@@ -778,6 +914,16 @@ const Studio = (() => {
     slide('spWidth', v => st.sp.width = v / 100);
     slide('spRoomAmt', v => st.sp.roomAmt = v / 100, true);
     syncSpatial();
+    // effects
+    root.querySelectorAll('[data-fx]').forEach(el => {
+      const k = el.dataset.fx;
+      el.addEventListener('input', () => { fxSet(k, FX_PCT.includes(k) ? +el.value / 100 : +el.value); root.querySelectorAll('[data-preset]').forEach(b => b.classList.remove('on')); syncFx(); });
+      el.addEventListener('dblclick', () => { fxSet(k, k.startsWith('eq.') ? 0 : Effects.DEFAULTS[k]); syncFx(); });
+    });
+    root.querySelector('.fx-tabs').addEventListener('click', e => { const b = e.target.closest('[data-fxtab]'); if (b) { st.fxTab = b.dataset.fxtab; syncFx(); } });
+    root.querySelector('.fx-presets').addEventListener('click', e => { const b = e.target.closest('[data-preset]'); if (b) applyPreset(b.dataset.preset); });
+    q('loud').addEventListener('click', e => { const b = e.target.closest('button'); if (b) { st.fx.loud = b.dataset.v; syncFx(); } });
+    syncFx();
     q('revAmt').addEventListener('input', e => {
       st.reverbAmount = +e.target.value / 100; q('revAmtVal').textContent = e.target.value + '%'; fx.update();
     });
@@ -797,7 +943,7 @@ const Studio = (() => {
   }
 
   async function save() {
-    const segs = kept().map(s => ({ start: +s.start.toFixed(3), end: +s.end.toFixed(3), speed: s.speed, d8: !!s.d8 }));
+    const segs = kept().map(s => ({ start: +s.start.toFixed(3), end: +s.end.toFixed(3), speed: s.speed, d8: !!s.d8, rev: !!s.rev, mute: !!s.mute, rep: s.rep || 1 }));
     if (!segs.length) return toast('Everything is cut — nothing to save', { error: true });
     const btn = q('save'); btn.disabled = true;
     const label = btn.innerHTML;
@@ -808,6 +954,7 @@ const Studio = (() => {
         btn.innerHTML = `<span class="mini-bar indet" style="width:60px"><div></div></span><span>Saving…</span>`;
         const fd = new FormData();
         fd.append('audio', Spatial.encodeWav(out), 'edit.wav'); fd.append('source', st.id); fd.append('title', title);
+        fd.append('loud', st.fx.loud); fd.append('gain', st.fx.gain);
         const r = await fetch('/api/edit/upload', { method: 'POST', body: fd });
         const song = await r.json(); if (!r.ok) throw new Error(song.error || 'Saving failed');
         toast('Saved to your library 🎧', { img: thumb(st.song), sub: song.title });
@@ -835,5 +982,5 @@ const Studio = (() => {
     return false;
   }
 
-  return { mount, unmount, onKey };
+  return { mount, unmount, onKey, debugAudio: () => fx.ctx && { level: fx.chain.level.gain.value, spMake: fx.spMake.gain.value, state: fx.ctx.state } };
 })();

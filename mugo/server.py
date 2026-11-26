@@ -409,6 +409,8 @@ def build_filter(segments: list[dict], opts: dict) -> tuple[str, float]:
     pitch_mode = opts.get("pitch", "keep")
     fade_in, fade_out = float(opts.get("fadeIn", 0)), float(opts.get("fadeOut", 0))
     rs = resample_opts()
+    # "repeat this part" = the segment appears N times in a row
+    segments = [s for s in segments for _ in range(max(1, min(8, int(s.get("rep", 1) or 1))))]
     n = len(segments)
     lines = [f"[0:a]aresample=44100{rs},aformat=sample_fmts=fltp:channel_layouts=stereo,asplit={n}"
              + "".join(f"[in{i}]" for i in range(n))]
@@ -418,6 +420,10 @@ def build_filter(segments: list[dict], opts: dict) -> tuple[str, float]:
         a, b, sp = float(seg["start"]), float(seg["end"]), float(seg.get("speed", 1))
         sp = min(max(sp, 0.25), 3.0)
         chain = [f"atrim=start={a:.4f}:end={b:.4f}", "asetpts=PTS-STARTPTS"]
+        if seg.get("rev"):
+            chain.append("areverse")
+        if seg.get("mute"):
+            chain.append("volume=0")
         if abs(sp - 1) > 1e-4:
             if pitch_mode == "vinyl":  # true varispeed: pitch follows speed, like slowing a turntable
                 chain += [f"asetrate={44100 * sp:.3f}", f"aresample=44100{rs}"]
@@ -450,6 +456,7 @@ def build_filter(segments: list[dict], opts: dict) -> tuple[str, float]:
     if tone:
         lines.append("[cat]" + ",".join(tone) + "[tone]")
         last = "tone"
+    last = fx_lines(lines, last, opts.get("fx") or {}, total)
     mode8d = opts.get("eightD") or "off"
     if mode8d == "all" or (mode8d == "parts" and d8_parts):
         lines += eight_d_lines(last, "e8d", float(opts.get("eightDPeriod", 8) or 8),
@@ -471,6 +478,11 @@ def build_filter(segments: list[dict], opts: dict) -> tuple[str, float]:
         last = "rv"
         total += 0  # the tail is cut to the song length (duration=first)
     post = []
+    fx = opts.get("fx") or {}
+    punch = fx.get("punch", 0)
+    if punch > 0.01:   # compressor: more punch = lower threshold, higher ratio, auto make-up
+        post.append(f"acompressor=threshold={-10 - 20 * punch:.1f}dB:ratio={2 + 4 * punch:.2f}:attack=8:release=140"
+                    f":makeup={10 ** (makeup('punch', punch) / 20):.3f}:knee=4")
     if fade_in > 0:
         post.append(f"afade=t=in:d={fade_in:.3f}")
     if fade_out > 0:
@@ -478,6 +490,130 @@ def build_filter(segments: list[dict], opts: dict) -> tuple[str, float]:
     post.append("alimiter=limit=0.97:attack=3:release=60:level=false")  # never clip
     lines.append(f"[{last}]" + ",".join(post) + "[out]")
     return ";".join(lines), total
+
+
+FX_DEFAULTS = {
+    "eq": [0, 0, 0, 0, 0], "vocals": 0, "width": 1, "drive": 0, "crush": 0, "radio": 0, "lofi": 0,
+    "chorus": 0, "flanger": 0, "phaser": 0, "trem": 0, "tremRate": 5, "vib": 0, "vibRate": 5,
+    "echo": 0, "echoTime": 350, "echoFb": 0.35, "punch": 0, "gain": 0, "loud": "off",
+}
+LOUDNESS = {"streaming": -14, "loud": -9, "max": -7}
+
+
+def clean_fx(raw) -> dict:
+    """Sanitise the effect settings sent by the Studio (all numbers clamped to safe ranges)."""
+    raw = raw if isinstance(raw, dict) else {}
+    num = lambda k, lo, hi: max(lo, min(hi, float(raw.get(k, FX_DEFAULTS[k]) or 0)))
+    eq = raw.get("eq") if isinstance(raw.get("eq"), list) else []
+    return {
+        "eq": [max(-15.0, min(15.0, float(v or 0))) for v in (eq + [0] * 5)[:5]],
+        "vocals": num("vocals", 0, 1), "width": num("width", 0, 2), "drive": num("drive", 0, 1),
+        "crush": num("crush", 0, 1), "radio": num("radio", 0, 1), "lofi": num("lofi", 0, 1),
+        "chorus": num("chorus", 0, 1), "flanger": num("flanger", 0, 1), "phaser": num("phaser", 0, 1),
+        "trem": num("trem", 0, 1), "tremRate": num("tremRate", 0.5, 16), "vib": num("vib", 0, 1),
+        "vibRate": num("vibRate", 0.5, 12), "echo": num("echo", 0, 1), "echoTime": num("echoTime", 40, 1500),
+        "echoFb": num("echoFb", 0, 0.9), "punch": num("punch", 0, 1), "gain": num("gain", -18, 18),
+        "loud": raw.get("loud") if raw.get("loud") in LOUDNESS else "off",
+    }
+
+
+# Auto gain: measured loudness change of each effect on real music at amount 0 / 50 / 100 %,
+# given back right after the effect so every effect changes the sound, not the volume.
+FX_MAKEUP = {
+    "vocals": (0, 1.4, -1.1), "drive": (0, 0.5, 3.8), "radio": (0, 4.2, 3.2), "lofi": (0, 4.0, 5.8),
+    "chorus": (0, -0.6, -2.2), "flanger": (0, 3.2, 5.2), "phaser": (0, 0.7, -0.2), "trem": (0, 2.0, 3.8),
+    "echo": (0, -0.6, -2.2), "punch": (0, 9.5, 17.9),
+}
+
+
+def makeup(name: str, amt: float) -> float:
+    a, b, c = FX_MAKEUP[name]
+    return a + (b - a) * amt * 2 if amt <= 0.5 else b + (c - b) * (amt - 0.5) * 2
+
+
+EQ_BANDS = [("lowshelf", 60, 0), ("peak", 250, 1.0), ("peak", 1000, 1.0), ("peak", 3500, 1.1), ("highshelf", 10000, 0)]
+
+
+def fx_lines(lines: list, last: str, fx: dict, total: float) -> str:
+    """The effects rack. Appends filtergraph lines, returns the new output label.
+    Order: vocals → EQ → drive → bitcrush → radio → lo-fi → chorus → flanger → phaser →
+    vibrato → tremolo → echo → stereo width (dynamics and volume come at the very end)."""
+    if not fx:
+        return last
+    n = [0]
+    def step(chain: str) -> None:            # simple in → out filter chain
+        nonlocal last
+        n[0] += 1; out = f"fx{n[0]}"
+        lines.append(f"[{last}]{chain}[{out}]"); last = out
+    def blend(wet_chain: str, wet: float, dry: float = None) -> None:   # parallel wet/dry mix
+        nonlocal last
+        n[0] += 1; k = n[0]; dry = 1 - wet if dry is None else dry
+        lines.append(f"[{last}]asplit=2[fxd{k}][fxw{k}]")
+        lines.append(f"[fxw{k}]{wet_chain}[fxw{k}o]")
+        lines.append(f"[fxd{k}][fxw{k}o]amix=inputs=2:weights={dry:.4f} {wet:.4f}:normalize=0:duration=first[fx{k}]")
+        last = f"fx{k}"
+
+    if fx["vocals"] > 0.01:   # karaoke: keep the sides + the bass, drop the centre (where vocals live)
+        n[0] += 1; k = n[0]
+        lines.append(f"[{last}]asplit=2[vk{k}a][vk{k}b]")
+        lines.append(f"[vk{k}b]asplit=2[vk{k}s][vk{k}m]")
+        lines.append(f"[vk{k}s]pan=stereo|c0=0.5*c0-0.5*c1|c1=-0.5*c0+0.5*c1[vk{k}side]")
+        lines.append(f"[vk{k}m]pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1,lowpass=f=150,lowpass=f=150[vk{k}low]")
+        lines.append(f"[vk{k}side][vk{k}low]amix=inputs=2:normalize=0[vk{k}kar]")
+        v = fx["vocals"]
+        lines.append(f"[vk{k}a][vk{k}kar]amix=inputs=2:weights={1 - v:.4f} {v * 1.4:.4f}:normalize=0:duration=first[fx{k}]")
+        last = f"fx{k}"
+        step(f"volume={makeup('vocals', v):.2f}dB")
+    eq = [f"{'bass' if t == 'lowshelf' else 'treble'}=g={g:.2f}:f={f}:w=0.7" if t != "peak"
+          else f"equalizer=f={f}:t=q:w={q}:g={g:.2f}"
+          for (t, f, q), g in zip(EQ_BANDS, fx["eq"]) if abs(g) > 0.05]
+    if eq:
+        step(",".join(eq))
+    if fx["drive"] > 0.01:   # tube-style saturation: push into a soft clipper, then level back down
+        d = fx["drive"]; pre = 2 + 22 * d
+        blend(f"volume={pre:.2f}dB,asoftclip=type=tanh,volume={-pre * 0.62:.2f}dB", min(1, 0.35 + d), max(0, 0.65 - d))
+        step(f"volume={makeup('drive', d):.2f}dB")
+    if fx["crush"] > 0.01:
+        c = fx["crush"]
+        step(f"acrusher=bits={16 - 12 * c:.2f}:samples={1 + 9 * c:.2f}:mix={min(1, 0.3 + 0.7 * c):.3f}:mode=lin:aa=0.6")
+    if fx["radio"] > 0.01:   # telephone / old radio band
+        blend("highpass=f=420,highpass=f=420,lowpass=f=3300,lowpass=f=3300,volume=8dB,asoftclip=type=tanh,volume=-2dB", fx["radio"])
+        step(f"volume={makeup('radio', fx['radio']):.2f}dB")
+    if fx["lofi"] > 0.01:    # tape: darker, thinner, wobbly, with vinyl crackle
+        l = fx["lofi"]
+        step(f"highpass=f={40 + 160 * l:.0f},lowpass=f={14000 - 10000 * l:.0f},"
+             f"vibrato=f=0.7:d={0.03 + 0.17 * l:.3f}")
+        step(f"volume={makeup('lofi', l):.2f}dB")
+        # vinyl crackle, generated inside the music stream itself (a separate noise source would
+        # have to be kept in sync with the song, which breaks with edited / joined parts)
+        thr, amp = 1 - 0.0009 * l, 0.5 * l
+        step(f"aeval='val(0)+gt(random(0),{thr:.6f})*(random(1)-0.5)*{amp:.3f}"
+             f"|val(1)+gt(random(2),{thr:.6f})*(random(3)-0.5)*{amp:.3f}':c=same")
+    if fx["chorus"] > 0.01:
+        c = fx["chorus"]
+        step(f"chorus=0.8:0.9:42|55|67:{0.45 * c:.3f}|{0.4 * c:.3f}|{0.35 * c:.3f}:0.25|0.4|0.31:2|2.3|1.8,"
+             f"volume={makeup('chorus', c):.2f}dB")
+    if fx["flanger"] > 0.01:
+        f_ = fx["flanger"]
+        step(f"flanger=delay=1:depth={1 + 4 * f_:.2f}:regen={20 + 40 * f_:.0f}:width={40 + 50 * f_:.0f}:speed=0.35:shape=sinusoidal:interp=quadratic,"
+             f"volume={makeup('flanger', f_):.2f}dB")
+    if fx["phaser"] > 0.01:
+        blend(f"aphaser=in_gain=0.6:out_gain=0.9:delay=3:decay={0.4 + 0.45 * fx['phaser']:.2f}:speed=0.45:type=t", fx["phaser"] * 0.8)
+        step(f"volume={makeup('phaser', fx['phaser']):.2f}dB")
+    if fx["vib"] > 0.01:
+        step(f"vibrato=f={fx['vibRate']:.2f}:d={0.05 + 0.6 * fx['vib']:.3f}")
+    if fx["trem"] > 0.01:
+        step(f"tremolo=f={fx['tremRate']:.2f}:d={0.9 * fx['trem']:.3f},volume={makeup('trem', fx['trem']):.2f}dB")
+    if fx["echo"] > 0.01:    # repeating echo: 6 taps, each one quieter by the feedback amount
+        t, fb, m = fx["echoTime"], fx["echoFb"], fx["echo"]
+        taps = [i * t for i in range(1, 7) if i * t < 5000]
+        decays = [m * 0.8 * fb ** i for i in range(len(taps))]
+        step(f"aecho=in_gain=1:out_gain=1:delays={'|'.join(f'{d:.0f}' for d in taps)}"
+             f":decays={'|'.join(f'{max(d, 0.001):.4f}' for d in decays)},volume={makeup('echo', m):.2f}dB")
+    if abs(fx["width"] - 1) > 0.01:   # mid/side width: 0 = mono, 1 = original, 2 = extra wide
+        w = fx["width"]; a, b = 0.5 + 0.5 * w, 0.5 - 0.5 * w
+        step(f"pan=stereo|c0={a:.4f}*c0+{b:.4f}*c1|c1={b:.4f}*c0+{a:.4f}*c1")
+    return last
 
 
 def eight_d_lines(inp: str, out: str, period: float, parts) -> list[str]:
@@ -533,17 +669,84 @@ def eight_d_lines(inp: str, out: str, period: float, parts) -> list[str]:
     return lines
 
 
-def run_render(src_path: Path, segments, opts: dict, out: Path) -> float:
-    graph, total = build_filter(segments, opts)
-    codec = ["-c:a", "pcm_f32le"] if out.suffix == ".wav" else ["-c:a", "aac", "-b:a", "256k"]
-    cmd = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(src_path),
-        "-filter_complex", graph, "-map", "[out]", *codec, "-vn", str(out),
-    ]
+def _ff(args: list) -> subprocess.CompletedProcess:
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # no flashing console on Windows
-    r = subprocess.run(cmd, capture_output=True, text=True, creationflags=flags)
+    r = subprocess.run(["ffmpeg", "-y", "-hide_banner", *args], capture_output=True, text=True, creationflags=flags)
     if r.returncode != 0:
         raise RuntimeError(r.stderr.strip()[-300:] or "ffmpeg failed")
+    return r
+
+
+def codec_for(out: Path) -> list:
+    return ["-c:a", "pcm_f32le"] if out.suffix == ".wav" else ["-c:a", "aac", "-b:a", "256k"]
+
+
+def measure_lufs(path: Path) -> float:
+    r = _ff(["-nostats", "-i", str(path), "-af", "ebur128=framelog=quiet", "-f", "null", "-"])
+    m = re.findall(r"I:\s+(-?[\d.]+) LUFS", r.stderr)
+    return float(m[-1]) if m else -23.0
+
+
+_lufs_cache: dict = {}
+
+
+def song_lufs(path: Path) -> float:
+    key = (str(path), path.stat().st_mtime)
+    if key not in _lufs_cache:
+        _lufs_cache[key] = measure_lufs(path)
+    return _lufs_cache[key]
+
+
+def finalize(src: Path, out: Path, loud: str, ref: Path | None = None, gain_db: float = 0.0) -> None:
+    """Set the loudness of a lossless render and encode it once.
+    loud = a LOUDNESS target, or "off" = match the original song (`ref`) so effects change the
+    sound, not the volume. `gain_db` (the Volume slider) is applied on top."""
+    target = LOUDNESS.get(loud)
+    if target is None:
+        if ref is None:
+            if src != out:
+                _ff(["-loglevel", "error", "-i", str(src), *codec_for(out), "-vn", str(out)])
+            return
+        target = song_lufs(ref)
+    target = max(-40.0, min(-5.0, target + gain_db))
+    # measure → gain → limiter (peaks ≤ -1 dBFS) → measure again and correct once if the limiter
+    # took loudness away (that's how loud masters are made; a pure gain change can't go louder)
+    tmp = out.with_suffix(".final" + out.suffix) if src == out else out
+    stage = out.with_name(out.stem + ".stage.wav")
+    try:
+        have = measure_lufs(src)
+        if have < -69:          # silence: nothing to level
+            _ff(["-loglevel", "error", "-i", str(src), *codec_for(out), "-vn", str(tmp)])
+        else:
+            gain = max(-30.0, min(24.0, target - have))
+            lim = "alimiter=limit=0.85:attack=5:release=80:asc=1:asc_level=0.5:level=false"
+            _ff(["-loglevel", "error", "-i", str(src), "-af", f"volume={gain:.2f}dB,{lim}", "-c:a", "pcm_f32le", str(stage)])
+            short = target - measure_lufs(stage)
+            if short > 0.4:     # the limiter ate some loudness: push a bit more into it
+                gain = min(24.0, gain + short * 1.1)
+            _ff(["-loglevel", "error", "-i", str(src), "-af", f"volume={gain:.2f}dB,{lim}", *codec_for(out), "-vn", str(tmp)])
+    finally:
+        stage.unlink(missing_ok=True)
+    if tmp != out:
+        os.replace(tmp, out)
+
+
+def run_render(src_path: Path, segments, opts: dict, out: Path, match: bool = True) -> float:
+    """Render lossless, then one measured pass sets the loudness and encodes.
+    match=False skips loudness work (used for the in-between file of a 16D render)."""
+    graph, total = build_filter(segments, opts)
+    fx = opts.get("fx") or {}
+    first = out.with_name(out.stem + ".lossless.wav") if match or out.suffix != ".wav" else out
+    _ff(["-loglevel", "error", "-i", str(src_path), "-filter_complex", graph, "-map", "[out]",
+         *codec_for(first), "-vn", str(first)])
+    if first != out:
+        try:
+            if match:
+                finalize(first, out, fx.get("loud", "off"), ref=src_path, gain_db=fx.get("gain", 0))
+            else:
+                finalize(first, out, "off")
+        finally:
+            first.unlink(missing_ok=True)
     return total
 
 
@@ -842,13 +1045,12 @@ def edit_upload():
     out = AUDIO_DIR / f"{new_id}.m4a"
     try:
         duration = wav_duration(tmp)
-        r = subprocess.run(
-            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(tmp),
-             "-c:a", "aac", "-b:a", "256k", "-vn", str(out)],
-            capture_output=True, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        if r.returncode != 0:
-            raise RuntimeError(r.stderr.strip()[-300:] or "ffmpeg failed")
+        loud = request.form.get("loud", "off")
+        try:
+            gain = max(-18.0, min(18.0, float(request.form.get("gain", 0) or 0)))
+        except ValueError:
+            gain = 0.0
+        finalize(tmp, out, loud if loud in LOUDNESS else "off", ref=AUDIO_DIR / src["file"], gain_db=gain)
     except Exception as e:
         out.unlink(missing_ok=True)
         return jsonify({"error": f"Saving failed: {e}"}), 500
@@ -876,6 +1078,7 @@ def edit_opts(body: dict) -> dict:
         "eightD": body.get("eightD") if body.get("eightD") in ("off", "all", "parts") else "off",
         "eightDPeriod": float(body.get("eightDPeriod", 8) or 8),
         "warm": bool(body.get("warm")),
+        "fx": clean_fx(body.get("fx")),
     }
 
 
@@ -896,7 +1099,8 @@ def preview():
     ext = "wav" if body.get("format") == "wav" else "m4a"
     with preview_lock:
         try:
-            total = run_render(AUDIO_DIR / src["file"], segs, edit_opts(body), cache / f"preview.{ext}")
+            total = run_render(AUDIO_DIR / src["file"], segs, edit_opts(body), cache / f"preview.{ext}",
+                               match=ext != "wav")
         except Exception as e:
             return jsonify({"error": f"Preview failed: {e}"}), 500
     return jsonify({"url": f"/media/preview?fmt={ext}&v={int(now() * 1000)}", "duration": total})

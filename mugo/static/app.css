@@ -616,3 +616,25 @@ kbd { font: 600 11px ui-monospace, monospace; color: var(--faint); border: 1px s
 .speed-num:hover { border-bottom-color: #f472b6; }
 .speed-num:focus { background: rgba(255,255,255,.08); border-bottom: 1.5px solid #f472b6; }
 .speed-x { font-weight: 800; margin-left: -6px; color: var(--muted); }
+
+/* effects panel */
+.fx-presets { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 14px; }
+.chip { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 14px; border-radius: 999px; font-weight: 700; font-size: 13px;
+  background: var(--surface); border: 1px solid var(--border); color: var(--muted); transition: background .2s, color .2s, transform .2s var(--spring), border-color .2s; }
+.chip .ic { width: 16px; height: 16px; }
+.chip:hover { color: var(--text); background: var(--surface-2); transform: translateY(-1px); }
+.chip.on { color: #fff; background: var(--grad); border-color: transparent; box-shadow: 0 8px 22px -10px rgba(244,114,182,.8); }
+.fx-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 8px; overflow-x: auto; }
+.fx-tabs button { position: relative; padding: 10px 14px; font-weight: 700; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; }
+.fx-tabs button:hover { color: var(--text); }
+.fx-tabs button.on { color: var(--text); border-bottom-color: #f472b6; }
+.fx-tabs .dot { display: none; position: absolute; top: 8px; right: 4px; width: 6px; height: 6px; border-radius: 50%; background: #f472b6; box-shadow: 0 0 8px #f472b6; }
+.fx-tabs button.active .dot { display: block; }
+.fx-slider input { accent-color: #f472b6; }
+.eq-bank { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; padding: 14px 6px 6px; }
+.eq-band { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 12px 6px; border-radius: 14px; background: var(--surface); border: 1px solid var(--border); }
+.eq-band b { font-variant-numeric: tabular-nums; font-size: 13px; }
+.eq-band span { font-weight: 700; font-size: 13px; }
+.eq-band small { color: var(--faint); font-size: 11px; margin-top: -6px; }
+.eq-v { writing-mode: vertical-lr; direction: rtl; height: 150px; width: 28px; accent-color: #f472b6; cursor: ns-resize; }
+.seg-btns .btn.part { color: #5eead4; }

@@ -58,7 +58,7 @@ const Spatial = (() => {
 
   const DEFAULTS = {
     engine: 'binaural', motion: 'circle', dir: 1, period: 8, distance: 1.6, breath: .3,
-    height: .2, width: .35, room: 'studio', roomAmt: .6, keepBass: true,
+    height: .2, width: .6, room: 'studio', roomAmt: .6, keepBass: true,
   };
 
   /* ---------------- motion paths ---------------- */
@@ -251,8 +251,8 @@ const Spatial = (() => {
     onProgress?.(1);
     const lat = LATENCY;  // the effect comes out this many samples late; read it early so it lines up
     // loudness-match the effect to the original, mix by gate, then keep peaks under 0 dBFS
-    const rms = (ab, len) => { let e = 0, c = 0; for (let ch = 0; ch < 2; ch++) { const d = ab.getChannelData(Math.min(ch, ab.numberOfChannels - 1)); for (let i = 0; i < len; i += 4) { e += d[i] * d[i]; c++; } } return Math.sqrt(e / Math.max(1, c)); };
-    const k = rms(buf, n) / Math.max(1e-9, rms(wet, n + LATENCY));
+    // match perceived loudness (K-weighted, like LUFS), measured where the effect is used
+    const k = kRms(buf, 0, n, gate) / Math.max(1e-9, kRms(wet, LATENCY, n, gate));
     const out = new AudioBuffer({ numberOfChannels: 2, length: n, sampleRate: sr });
     let peak = 0;
     for (let ch = 0; ch < 2; ch++) {
@@ -263,8 +263,51 @@ const Spatial = (() => {
         o[i] = v; const a = Math.abs(v); if (a > peak) peak = a;
       }
     }
-    if (peak > .97) { const sc = .97 / peak; for (let ch = 0; ch < 2; ch++) { const o = out.getChannelData(ch); for (let i = 0; i < n; i++) o[i] *= sc; } }
+    if (peak > CEIL) limit(out);   // only the brief peaks are turned down, the song keeps its full loudness
     return out;
+  }
+
+  /** loudness the way ears / LUFS meters weigh it: K-weighting (high-pass + presence shelf), RMS */
+  function kRms(ab, offset, n, gate) {
+    const sr = ab.sampleRate;
+    const biq = (type, f, gDb, q) => {   // RBJ cookbook biquad coefficients
+      const A = Math.pow(10, gDb / 40), w = 2 * Math.PI * f / sr, cs = Math.cos(w), al = Math.sin(w) / (2 * q);
+      let b0, b1, b2, a0, a1, a2;
+      if (type === 'hp') { b0 = (1 + cs) / 2; b1 = -(1 + cs); b2 = b0; a0 = 1 + al; a1 = -2 * cs; a2 = 1 - al; }
+      else { const sq = 2 * Math.sqrt(A) * al;
+        b0 = A * ((A + 1) + (A - 1) * cs + sq); b1 = -2 * A * ((A - 1) + (A + 1) * cs); b2 = A * ((A + 1) + (A - 1) * cs - sq);
+        a0 = (A + 1) - (A - 1) * cs + sq; a1 = 2 * ((A - 1) - (A + 1) * cs); a2 = (A + 1) - (A - 1) * cs - sq; }
+      return [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0];
+    };
+    const shelf = biq('hs', 1681, 4, .707), hp = biq('hp', 38, 0, .5);
+    let e = 0, c = 0;
+    for (let ch = 0; ch < 2; ch++) {
+      const d = ab.getChannelData(Math.min(ch, ab.numberOfChannels - 1));
+      let x1 = 0, x2 = 0, y1 = 0, y2 = 0, u1 = 0, u2 = 0, z1 = 0, z2 = 0;
+      for (let i = 0; i < n; i++) {
+        const x = d[i + offset] || 0;
+        const y = shelf[0] * x + shelf[1] * x1 + shelf[2] * x2 - shelf[3] * y1 - shelf[4] * y2; x2 = x1; x1 = x; y2 = y1; y1 = y;
+        const z = hp[0] * y + hp[1] * u1 + hp[2] * u2 - hp[3] * z1 - hp[4] * z2; u2 = u1; u1 = y; z2 = z1; z1 = z;
+        const w = gate ? gate(i / sr) : 1;
+        if (w > .5) { e += z * z; c++; }
+      }
+    }
+    return Math.sqrt(e / Math.max(1, c));
+  }
+
+  /* Look-ahead peak limiter (like a mastering limiter). Instead of turning the whole song down
+     when the 3D processing creates a few higher peaks, it dips the gain for just those moments:
+     5 ms look-ahead so the gain is already down when a peak arrives, ~120 ms smooth release. */
+  const CEIL = Math.pow(10, -0.6 / 20);   // -0.6 dBFS, leaves room for the AAC encoder
+  function limit(ab) {
+    const sr = ab.sampleRate, n = ab.length, L = ab.getChannelData(0), R = ab.getChannelData(1);
+    const g = new Float32Array(n);
+    for (let i = 0; i < n; i++) { const a = Math.max(Math.abs(L[i]), Math.abs(R[i])); g[i] = a > CEIL ? CEIL / a : 1; }
+    const look = Math.round(sr * .005), att = 1 / look;
+    for (let i = n - 2; i >= 0; i--) g[i] = Math.min(g[i], g[i + 1] + att);          // ramp down ahead of each peak
+    const rel = 1 - Math.exp(-1 / (sr * .12));
+    for (let i = 1; i < n; i++) g[i] = Math.min(g[i], g[i - 1] + (1 - g[i - 1]) * rel);  // smooth recovery
+    for (let i = 0; i < n; i++) { L[i] *= g[i]; R[i] *= g[i]; }
   }
 
   /** 32-bit float WAV for upload (lossless — the only lossy step left is the final encode) */
@@ -284,9 +327,11 @@ const Spatial = (() => {
   /* ---------------- live loudness matcher (preview) ---------------- */
   function makeMatcher(ctx, dryNode, wetNode, makeup) {
     const a = ctx.createAnalyser(), b = ctx.createAnalyser(); a.fftSize = b.fftSize = 2048;
-    dryNode.connect(a); wetNode.connect(b);
+    // measure AFTER the make-up gain: the correction below is relative to the current gain
+    // (measuring before it made the gain compound until it hit its limit)
+    dryNode.connect(a); makeup.connect(b);
     const da = new Float32Array(2048), db = new Float32Array(2048);
-    let ratio = 1.6;
+    let ratio = makeup.gain.value || 1;
     return () => {
       a.getFloatTimeDomainData(da); b.getFloatTimeDomainData(db);
       let x = 0, y = 0; for (let i = 0; i < 2048; i++) { x += da[i] * da[i]; y += db[i] * db[i]; }
